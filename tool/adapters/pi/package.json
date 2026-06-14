@@ -1,0 +1,10 @@
+{
+  "name": "stitchpad-pi",
+  "version": "0.1.0",
+  "description": "stitchpad wake adapter for the pi coding agent — drains @mentions at turn-end and steers them in",
+  "type": "module",
+  "keywords": ["pi-package", "pi", "pi-coding-agent", "extension", "stitchpad"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}

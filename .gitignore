@@ -1,5 +1,7 @@
 .DS_Store
 *.log
+# local tooling, not part of the product
+.claude/
 # per-project channel runtime state (when stitchpad is used somewhere)
 .stitchpad/.state/
 .stitchpad/stitchpad-git/

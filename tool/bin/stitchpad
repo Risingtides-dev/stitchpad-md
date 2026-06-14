@@ -5,6 +5,7 @@
 #   stitchpad join <name> <adapter> [wake] [target]   add a participant to the roster
 #   stitchpad say <from> <text...>        post a message (auto-commits)
 #   stitchpad read [-n N]                 print the recent conversation (plain)
+#   stitchpad wake <name> [--peek]        print new @name messages since last drain
 #   stitchpad watch                       run the daemon (foreground)
 #   stitchpad start|stop|status|restart   manage the daemon (background)
 #   stitchpad roster                      print parsed roster
@@ -67,8 +68,9 @@ EOF
     who="${1:?usage: stitchpad join <name> <adapter> [wake] [target]}"
     adapter="${2:?adapter required (e.g. pi, claude, codex, mcp)}"
     wake="${3:-pull}"; target="${4:--}"
-    if sp_user_exists "$who"; then echo "$who already in roster"; exit 0; fi
-    # Insert before the closing fence of the roster block.
+    sp_lock || exit 1
+    if sp_user_exists "$who"; then sp_unlock; echo "$who already in roster"; exit 0; fi
+    # Insert before the closing fence of the roster block (atomic under lock).
     tmp="$(mktemp)"
     awk -v line="$who | $adapter | $wake | $target" '
       /^```roster/ { inblk=1; print; next }
@@ -76,6 +78,10 @@ EOF
       { print }
     ' "$PAD_MD" > "$tmp" && mv "$tmp" "$PAD_MD"
     sp_commit "roster: + $who ($adapter/$wake)"
+    sp_unlock
+    # Record this session's identity so the wake hook knows who "I" am in this
+    # pad without any hardcoded name. The agent picks its name by joining.
+    printf '%s' "$who" > "$PAD_STATE/whoami"
     echo "✓ $who joined (adapter=$adapter wake=$wake)"
     ;;
 
@@ -84,8 +90,10 @@ EOF
     from="${1:?usage: stitchpad say <from> <text...>}"; shift
     text="$*"
     ts="$(date '+%H:%M')"
+    sp_lock || exit 1
     printf '\n## %s · %s\n\n%s\n' "@$from" "$ts" "$text" >> "$PAD_MD"
     sp_commit "$from: $(printf '%s' "$text" | tr '\n' ' ' | cut -c1-60)"
+    sp_unlock
     echo "✓ posted as @$from"
     ;;
 
@@ -93,6 +101,37 @@ EOF
     sp_init_paths || exit 1
     n=80; [ "${1:-}" = "-n" ] && n="$2"
     tail -n "$n" "$PAD_MD"
+    ;;
+
+  wake)
+    # The shared wake primitive every runtime adapter calls. Prints any messages
+    # addressed to <name> that are newer than that name's last-seen cursor, then
+    # advances the cursor. Empty output + exit 0 means "nothing new for you".
+    # Cursor = the pad's commit count last drained, stored per-name in .state.
+    #   stitchpad wake <name> [--peek]   (--peek: show without advancing cursor)
+    sp_init_paths || exit 1
+    # Name is optional: if omitted, use this pad's recorded identity (.state/whoami,
+    # written at join). Lets adapters call `stitchpad wake` with no hardcoded name.
+    who="${1:-}"
+    if [ -n "$who" ] && [ "$who" != "--peek" ]; then shift; else who=""; fi
+    if [ -z "$who" ]; then who="$(cat "$PAD_STATE/whoami" 2>/dev/null || true)"; fi
+    [ -z "$who" ] && exit 0   # nobody joined here → nothing to wake
+    peek=0; [ "${1:-}" = "--peek" ] && peek=1
+    cur_file="$PAD_STATE/cursor.$who"
+    seen=0; [ -f "$cur_file" ] && seen="$(cat "$cur_file" 2>/dev/null || echo 0)"
+    now="$(sgit rev-list --count HEAD 2>/dev/null || echo 0)"
+    # Nothing new since last drain → silent success.
+    if [ "$now" -le "$seen" ]; then exit 0; fi
+    # Are there any lines addressed to me at all? If not, just advance & exit.
+    cnt="$(sp_count_to "$who")"
+    if [ "${cnt:-0}" -eq 0 ]; then
+      [ "$peek" -eq 0 ] && printf '%s' "$now" > "$cur_file"
+      exit 0
+    fi
+    # Emit the latest block addressed to me (sender header + body).
+    sp_latest_to "$who"
+    if [ "$peek" -eq 0 ]; then printf '%s' "$now" > "$cur_file"; fi
+    exit 0
     ;;
 
   watch)   exec "$STITCHPAD_HOME/bin/watch.sh" ;;
@@ -106,6 +145,6 @@ EOF
     ;;
 
   help|*)
-    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
     ;;
 esac

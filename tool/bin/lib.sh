@@ -43,6 +43,42 @@ sp_init_paths() {
   mkdir -p "$PAD_STATE"
 }
 
+# ── Atomic pad mutation lock ─────────────────────────────────────────
+# Multiple agents may say/join the same pad concurrently. stitchpad.md is mutated
+# by bare appends (say) and read-rewrite (join); without serialization those race
+# (interleaved lines / lost updates). mkdir is atomic on every POSIX fs, so we use
+# a lock DIR as the mutex — no flock dependency (macOS lacks it). Auto-breaks a
+# stale lock so a crashed writer can't wedge the pad forever.
+SP_LOCK_TIMEOUT="${SP_LOCK_TIMEOUT:-5}"   # seconds to wait for the lock
+SP_LOCK_STALE="${SP_LOCK_STALE:-30}"      # seconds before a held lock is "stale"
+_SP_LOCK_DIR=""
+
+sp_lock() {
+  local lock="$PAD_STATE/.lock" waited=0
+  while ! mkdir "$lock" 2>/dev/null; do
+    # Break a stale lock (holder died without releasing).
+    if [ -d "$lock" ]; then
+      local age now mtime
+      now=$(date +%s)
+      mtime=$(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || echo "$now")
+      age=$(( now - mtime ))
+      if [ "$age" -ge "$SP_LOCK_STALE" ]; then rmdir "$lock" 2>/dev/null || true; continue; fi
+    fi
+    waited=$(( waited + 1 ))
+    [ "$waited" -ge $(( SP_LOCK_TIMEOUT * 10 )) ] && { echo "stitchpad: pad busy (lock timeout)" >&2; return 1; }
+    sleep 0.1
+  done
+  _SP_LOCK_DIR="$lock"
+  # Release on any exit so a killed writer doesn't wedge the pad.
+  trap 'sp_unlock' EXIT INT TERM
+  return 0
+}
+
+sp_unlock() {
+  [ -n "$_SP_LOCK_DIR" ] && rmdir "$_SP_LOCK_DIR" 2>/dev/null || true
+  _SP_LOCK_DIR=""
+}
+
 # Isolated git wrapper: history of just stitchpad.md, separate from project repo.
 sgit() { git --git-dir="$PAD_GIT" --work-tree="$PAD_DIR" "$@"; }
 

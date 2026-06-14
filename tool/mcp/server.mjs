@@ -1,20 +1,21 @@
 #!/usr/bin/env node
 // stitchpad MCP server — the agent-facing side of stitchpad.
 //
-// The whole plug-and-play story: an agent adds this MCP server, and on its first
-// `join` the server auto-detects the agent's OWN tmux pane ($TMUX_PANE) and
-// writes it into the roster. From then on, `@name` in stitchpad.md wakes that
-// exact terminal via `tmux send-keys` (the watcher's tmux adapter). No manual
-// pane ids, no per-runtime hooks.
+// The MCP is the IDENTITY + TALKING surface. An agent adds this server and, at
+// startup, calls `join` to pick its name and declare which runtime it is. join
+// records the name in the pad (.state/whoami) so the runtime's wake — a Stop
+// hook (claude/codex) or the pi-wake extension — knows who "I" am with no
+// hardcoded name. The MCP does NOT do the wake itself.
 //
 // Tools:
-//   join  — add yourself to the roster (auto-detects your tmux pane)
-//   say   — post a message to the pad
+//   join  — add yourself to the roster + record your identity for the wake hook
+//   say   — post a message to the pad (start with @name to address a teammate)
 //   read  — read the recent conversation
 //   who   — list the roster
 //
-// There is intentionally no `wait_for_mention`: the wake is push (tmux), not a
-// poll. The MCP is for registration + talking; the terminal wake does the rest.
+// There is intentionally no `wait_for_mention`: the wake is the runtime's own
+// turn-end hook reading the pad, not an MCP poll. MCP = register + talk; the
+// hook does the waking.
 //
 // All state lives in stitchpad.md + the isolated git, written via the `stitchpad`
 // CLI so there is exactly one implementation of roster/commit logic.
@@ -50,12 +51,6 @@ async function sp(args) {
   return (stdout || "") + (stderr ? `\n${stderr}` : "");
 }
 
-// The caller's own tmux pane, if it's running inside tmux. This is the %N id,
-// which `tmux send-keys -t` accepts and which survives window/pane renumbering.
-function myPane() {
-  return process.env.TMUX_PANE || null;
-}
-
 const server = new Server(
   { name: "stitchpad", version: "0.1.0" },
   { capabilities: { tools: {} } }
@@ -65,30 +60,25 @@ const TOOLS = [
   {
     name: "join",
     description:
-      "Join the stitchpad as a participant. Auto-detects your tmux pane so " +
-      "`@you` wakes this exact terminal. Call once per session at startup. " +
-      "If you are not in tmux, pass adapter='notify' to be pinged without an " +
-      "auto-wake.",
+      "Join the stitchpad: pick your handle and declare your runtime. Call once " +
+      "at startup. This records your identity so your runtime's wake hook (the " +
+      "Stop hook for claude/codex, or the pi-wake extension) knows to deliver " +
+      "messages addressed to @you. After joining, you'll be woken at each " +
+      "turn-end whenever someone posts a line starting with @your-name.",
     inputSchema: {
       type: "object",
       properties: {
         name: { type: "string", description: "Your handle in the room, e.g. 'larry'." },
         adapter: {
           type: "string",
-          enum: ["tmux", "notify", "pi"],
+          enum: ["claude", "codex", "pi"],
           description:
-            "How you get woken. 'tmux' (default) = send-keys into your pane; " +
-            "'notify' = desktop ping only; 'pi' = spawn headless pi.",
-          default: "tmux",
-        },
-        target: {
-          type: "string",
-          description:
-            "Wake target. For tmux, leave blank to auto-use your own pane " +
-            "($TMUX_PANE). For pi, the extension path. For notify, ignored.",
+            "Which runtime you are — selects how you get woken: claude/codex via " +
+            "their Stop hook, pi via the pi-wake extension. All read the pad at " +
+            "turn-end; no keystrokes are sent to your terminal.",
         },
       },
-      required: ["name"],
+      required: ["name", "adapter"],
     },
   },
   {
@@ -130,23 +120,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     let out;
     switch (name) {
       case "join": {
-        const adapter = a.adapter || "tmux";
-        let target = a.target || "-";
-        if (adapter === "tmux" && (!a.target || a.target === "-")) {
-          const pane = myPane();
-          if (!pane) {
-            return text(
-              "Can't auto-detect a tmux pane ($TMUX_PANE is empty) — you're not " +
-                "running inside tmux. Either start your session inside tmux, or " +
-                "join with adapter='notify'."
-            );
-          }
-          target = pane;
+        const adapter = a.adapter;
+        if (!["claude", "codex", "pi"].includes(adapter)) {
+          return text("adapter must be one of: claude, codex, pi");
         }
-        out = await sp(["join", a.name, adapter, "push", target]);
-        out += `\n(addressable as @${a.name}; wake=${adapter}${
-          adapter === "tmux" ? ` pane=${target}` : ""
-        })`;
+        // wake=push: the runtime's turn-end hook delivers messages addressed to you.
+        out = await sp(["join", a.name, adapter, "push", "-"]);
+        out += `\n(addressable as @${a.name}; you'll be woken at turn-end via the ${adapter} hook)`;
         break;
       }
       case "say":
