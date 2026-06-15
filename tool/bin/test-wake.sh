@@ -56,11 +56,24 @@ check "handle boundary: @markus does not wake mark" "0 1" '## @mark
 @markus is someone else.'
 
 # ── silent-ack convention ──────────────────────────────────────
-check "silent .ack does not clear my pending mention" "1 0" '## @dale
+# a silent .ack BY ME clears my own gate (it is my acknowledgement) — this is the
+# fix for the storm where self-acks never advanced the gate and re-fired forever.
+check "my own silent .ack clears my pending mention" "1 2" '## @dale
 @mark real question?
 
 ## @mark
 .ack got it'
+
+# but a silent .ack does NOT count as an addressed reply that would let me ignore a
+# LATER real mention — a fresh real mention after my ack still fires.
+check "real mention after my .ack still fires" "3 2" '## @dale
+@mark real question?
+
+## @mark
+.ack got it
+
+## @dale
+@mark actually one more thing?'
 
 check "silent [ack] mentioning me does not wake me" "0 1" '## @mark
 @dale earlier.

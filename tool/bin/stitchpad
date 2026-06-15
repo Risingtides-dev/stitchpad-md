@@ -249,11 +249,183 @@ EOF
   watch)   exec "$STITCHPAD_HOME/bin/watch.sh" ;;
   start|stop|status|restart) exec "$STITCHPAD_HOME/bin/daemon.sh" "$cmd" ;;
 
+  test)
+    # Discover and run all test scripts in test/ and bin/test-*.sh
+    passed=0; failed=0; total=0
+    tests=()
+    # STITCHPAD_HOME is tool/; repo root is one level up
+    REPO_ROOT="$(cd "$STITCHPAD_HOME/.." && pwd)"
+    for dir in "$STITCHPAD_HOME/test" "$STITCHPAD_HOME/bin" "$REPO_ROOT/test"; do
+      [ -d "$dir" ] || continue
+      while IFS= read -r -d '' t; do
+        tests+=("$t")
+      done < <(find "$dir" -maxdepth 1 \( -name 'test-*.sh' -o -name '*-regression.sh' -o -name 'identity-*.sh' \) -print0 2>/dev/null)
+    done
+    if [ ${#tests[@]} -eq 0 ]; then
+      echo "No test scripts found."
+      exit 1
+    fi
+    echo "=== stitchpad test ==="
+    echo ""
+    for t in "${tests[@]}"; do
+      total=$((total + 1))
+      name="$(basename "$t")"
+      echo "--- $name ---"
+      rc=0
+      STITCHPAD_HOME="$STITCHPAD_HOME" bash "$t" 2>&1 || rc=$?
+      if [ "$rc" -eq 0 ]; then
+        echo "  PASS: $name"
+        passed=$((passed + 1))
+      else
+        echo "  FAIL: $name (exit code $rc)"
+        failed=$((failed + 1))
+      fi
+      echo ""
+    done
+    echo "Results: $passed passed, $failed failed, $total total"
+    [ "$failed" -gt 0 ] && exit 1
+    exit 0
+    ;;
+
   roster|who)  sp_init_paths || exit 1; sp_roster ;;
   log)
     sp_init_paths || exit 1
     n=10; [ "${1:-}" = "-n" ] && n="$2"
     sgit log --oneline -n "$n"
+    ;;
+
+  doctor)
+    # Roster health check — read-only diagnostic, no mutations.
+    # Reports: untargeted entries, stale kitty targets, missing session identity,
+    # duplicate names, orphaned session files.
+    #   stitchpad doctor
+    sp_init_paths || exit 1
+    warn=0; err=0
+    printf 'stitchpad doctor — roster health check\n\n'
+
+    # Collect roster entries
+    declare -a _doc_names=()
+    declare -a _doc_adapters=()
+    declare -a _doc_wakes=()
+    declare -a _doc_targets=()
+    while IFS='|' read -r _dn _da _dw _dt; do
+      _doc_names+=("$_dn"); _doc_adapters+=("$_da")
+      _doc_wakes+=("$_dw"); _doc_targets+=("$_dt")
+    done < <(sp_roster)
+
+    # Check 1-4: per-entry diagnostics
+    for _di in "${!_doc_names[@]}"; do
+      _name="${_doc_names[_di]}"; _adapter="${_doc_adapters[_di]}"
+      _wake="${_doc_wakes[_di]}"; _target="${_doc_targets[_di]}"
+      issues=()
+
+      # Check 1: untargeted
+      if [ "$_target" = "-" ] || [ -z "$_target" ]; then
+        issues+=("target '-' (no wake target, unreachable)")
+        (( warn++ ))
+      fi
+
+      # Check 2: stale kitty target (with timeout)
+      if [ "$_adapter" = "kitty" ] && [ "$_target" != "-" ] && [ -n "$_target" ]; then
+        # Extract socket from target (format: unix:/path/to/socket@@window_id)
+        _sock="${_target%%@@*}"; _win="${_target##*@@}"
+        # Strip unix: prefix if present (kitty @ --to expects just the path)
+        _sock="${_sock#unix:}"
+        if [ -n "$_sock" ] && [ -n "$_win" ]; then
+          # Try to reach the socket first (2s timeout)
+          _ls_out=$(timeout 2 /Applications/kitty.app/Contents/MacOS/kitty @ --to "unix:$_sock" ls 2>/dev/null || true)
+          if [ -n "_ls_out" ]; then
+            # Socket reachable — extract window IDs from tabs[].groups[].windows[]
+            _win_ids=$(printf '%s' "$_ls_out" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for os_win in data:
+    for tab in os_win.get('tabs', []):
+        for grp in tab.get('groups', []):
+            for wid in grp.get('windows', []):
+                print(wid)
+" 2>/dev/null || true)
+            if ! printf '%s' "$_win_ids" | grep -q "^$_win$"; then
+              issues+=("stale target — kitty window $_win gone from socket $_sock")
+              (( err++ ))
+            fi
+          else
+            # Socket unreachable/timeout → unknown, not dead
+            issues+=("kitty socket unreachable (unknown status for window $_win)")
+            (( warn++ ))
+          fi
+        fi
+      fi
+
+      # Check 3: missing session identity (read-only)
+      if [ "$_adapter" != "kitty" ] || [ "$_target" != "-" ]; then
+        # Look for session file matching this name
+        _found_session=0
+        for _sf in "$PAD_STATE/sessions/"*; do
+          [ -f "$_sf" ] || continue
+          if [ "$(cat "$_sf" 2>/dev/null)" = "$_name" ]; then
+            _found_session=1; break
+          fi
+        done
+        # Also check whoami
+        if [ "$(cat "$PAD_STATE/whoami" 2>/dev/null)" = "$_name" ]; then
+          _found_session=1
+        fi
+        if [ "$_found_session" -eq 0 ]; then
+          issues+=("no session identity file")
+          (( warn++ ))
+        fi
+      fi
+
+      # Check 4: duplicates (count occurrences)
+      _dup_count=0
+      for _dj in "${!_doc_names[@]}"; do
+        if [ "${_doc_names[_dj]}" = "$_name" ]; then
+          (( _dup_count++ ))
+        fi
+      done
+      if [ "$_dup_count" -gt 1 ]; then
+        issues+=("duplicate name in roster ($_dup_count occurrences)")
+        (( err++ ))
+      fi
+
+      # Report
+      if [ ${#issues[@]} -eq 0 ]; then
+        printf '  ✓ @%s (%s/%s) — healthy\n' "$_name" "$_adapter" "$_wake"
+      else
+        for _issue in "${issues[@]}"; do
+          if [[ "$_issue" == *"stale"* ]] || [[ "$_issue" == *"duplicate"* ]]; then
+            printf '  ✗ @%s (%s/%s) — %s\n' "$_name" "$_adapter" "$_wake" "$_issue"
+            printf '     → suggested: stitchpad leave %s\n' "$_name"
+          else
+            printf '  ⚠ @%s (%s/%s) — %s\n' "$_name" "$_adapter" "$_wake" "$_issue"
+          fi
+        done
+      fi
+    done
+
+    # Check 5: orphaned session files
+    printf '\nSession files:\n'
+    for _sf in "$PAD_STATE/sessions/"*; do
+      [ -f "$_sf" ] || continue
+      _sname=$(cat "$_sf" 2>/dev/null)
+      _skey=$(basename "$_sf")
+      _in_roster=0
+      for _dn in "${_doc_names[@]}"; do
+        if [ "$_dn" = "$_sname" ]; then _in_roster=1; break; fi
+      done
+      if [ "$_in_roster" -eq 0 ]; then
+        printf '  ⚠ orphaned: sessions/%s → @%s (not in roster)\n' "$_skey" "$_sname"
+        (( warn++ ))
+      else
+        printf '  ✓ sessions/%s → @%s\n' "$_skey" "$_sname"
+      fi
+    done
+
+    # Summary
+    total=$(( warn + err ))
+    printf '\n%d issues found (%d warnings, %d errors)\n' "$total" "$warn" "$err"
+    if [ "$err" -gt 0 ]; then exit 1; fi
     ;;
 
   help|*)

@@ -194,9 +194,9 @@ sp_engagement() {
     function flush() {
       if (author=="") return
       n++
-      if (silent) return                                                          # silent post: ignored by the gate
-      if (author==who) { if (buf ~ /(^|[^a-z0-9_-])@[a-z0-9_-]/) last_reply=n }   # I addressed someone
-      else if (body_mentions(who)) last_mention=n                                 # someone addressed me
+      if (author==who) {                                                          # my own block:
+        if (silent || buf ~ /(^|[^a-z0-9_-])@[a-z0-9_-]/) last_reply=n           # a silent ack OR a real @-reply clears my gate
+      } else if (!silent && body_mentions(who)) last_mention=n                    # a silent post by another never wakes me; a real mention does
     }
     /^## @/ {
       flush()

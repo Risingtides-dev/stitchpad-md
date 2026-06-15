@@ -28,11 +28,30 @@ kitty_bin="$(command -v kitty 2>/dev/null || echo /Applications/kitty.app/Conten
 
 target="${SP_TARGET:-}"
 case "$target" in
-  *"@@"*) sock="${target%%@@*}"; win="${target##*@@}" ;;          # socket|window_id (normal)
-  ""|-)  echo "[$(ts)] no kitty target for @$to (agent must join from a kitty window)" >>"$log"; exit 1 ;;
-  *)     sock="${KITTY_SOCKET:-${KITTY_LISTEN_ON:-}}"; win="$target" ;;  # bare id fallback
+  *"@@"*) sock="${target%%@@*}"; win="${target##*@@}" ;;          # socket@@window_id (normal)
+  *)      sock=""; win="" ;;                                       # empty/-/bare → resolve below
 esac
-[ -n "$sock" ] || { echo "[$(ts)] no kitty socket for @$to" >>"$log"; exit 1; }
+
+# SELF-HEAL: if no usable target (codex/MCP often can't capture KITTY_WINDOW_ID),
+# find the agent's window by its title "🧵 <name>" via kitty's own window list.
+# Works without the agent ever having captured anything.
+if [ -z "$sock" ] || [ -z "$win" ]; then
+  sk="${KITTY_SOCKET:-${KITTY_LISTEN_ON:-unix:/tmp/kitty-thoth-675}}"
+  found="$("$kitty_bin" @ --to "$sk" ls 2>/dev/null | python3 -c '
+import sys,json
+try:
+  d=json.load(sys.stdin); name=sys.argv[1]
+  for o in d:
+    for t in o["tabs"]:
+      for w in t["windows"]:
+        if w.get("title","")=="🧵 "+name: print(w["id"]); raise SystemExit
+except SystemExit: pass
+except: pass' "$to" 2>/dev/null)"
+  if [ -n "$found" ]; then sock="$sk"; win="$found"
+    echo "[$(ts)] self-healed @$to target via title match -> win $win" >>"$log"
+  fi
+fi
+[ -n "$sock" ] && [ -n "$win" ] || { echo "[$(ts)] no kitty target for @$to (no @@target, no '🧵 $to' window found)" >>"$log"; exit 1; }
 
 # GUARD: never inject into a FOCUSED window — that's the one you're typing in, and
 # send-text would interleave with your keystrokes. Skip; the mention stays
