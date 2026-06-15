@@ -63,17 +63,19 @@ react() {
   local -a members=()
   local rline
   while IFS= read -r rline; do members+=("$rline"); done < <(sp_roster)
-  local m name adapter wake target new old cf
+  local m name adapter wake target
   for m in "${members[@]}"; do
     IFS='|' read -r name adapter wake target <<< "$m"
     [ -n "$name" ] || continue
-    cf="$(count_file "$name")"
-    new=$(sp_count_to "$name"); old=$(cat "$cf" 2>/dev/null || echo 0)
-    if [ "${new:-0}" -gt "${old:-0}" ]; then
-      echo "[stitchpad] new @$name mention (${old}->${new}) -> firing ${adapter} (${wake})"
+    # Fire ONLY if there's an UNANSWERED mention — the same engagement gate the
+    # hook wake uses (a @name newer than name's last @-reply). `wake --peek` prints
+    # the pending message iff unanswered and does NOT advance any cursor, so the
+    # nudge → agent replies → reply clears the gate. Raw count-up looped forever
+    # because an agent's own reply re-incremented the other's count.
+    if [ -n "$("$BIN_DIR/stitchpad" wake "$name" --peek 2>/dev/null)" ]; then
+      echo "[stitchpad] unanswered @$name -> firing ${adapter} (${wake})"
       fire_adapter "$name" "$adapter" "$wake" "$target"
     fi
-    echo "$new" > "$cf"
   done
 }
 
