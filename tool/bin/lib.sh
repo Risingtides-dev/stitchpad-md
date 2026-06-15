@@ -166,10 +166,12 @@ sp_count_to() {
 # Returns "" if none. Used by the engagement gate: last mention-to-me vs last
 # reply-by-me, both as commit indices.
 sp_last_commit_matching() {
-  local re="$1" re2="${2:-}"
+  local re="$1" re2="${2:-}" exclude="${3:-}"
   # Oldest→newest, numbered; keep matches; last match wins → its index.
-  sgit log --reverse --format='%s' 2>/dev/null | nl -ba -w1 -s$'\t' | awk -F'\t' -v re="$re" -v re2="$re2" '
-    $2 ~ re && (re2=="" || $2 ~ re2) { idx=$1 }
+  # <exclude> (optional): subjects matching it are skipped — used to ignore my own
+  # authored posts so a self-mention can't count as a mention TO me (the loop bug).
+  sgit log --reverse --format='%s' 2>/dev/null | nl -ba -w1 -s$'\t' | awk -F'\t' -v re="$re" -v re2="$re2" -v ex="$exclude" '
+    $2 ~ re && (re2=="" || $2 ~ re2) && (ex=="" || $2 !~ ex) { idx=$1 }
     END { if (idx) print idx }
   '
 }

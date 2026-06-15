@@ -202,7 +202,11 @@ EOF
     # commit, subject "<from>: <text>"). No cursor file, no extra state — purely a
     # function of the pad. An off-topic post (no @) is not a reply, so it doesn't
     # clear the block: the hook keeps firing until I actually reply to someone.
-    last_mention_to_me="$(sp_last_commit_matching "@${who}([^a-zA-Z0-9_-]|\$)")"
+    # author-skip: a mention TO me must not be a post I authored myself. Commit
+    # subjects are "<from>: <text>", so exclude subjects starting "<who>:". This is
+    # what stops a self-addressed @me (or any self-post containing @me) from looking
+    # like an unanswered mention and re-firing the hook forever.
+    last_mention_to_me="$(sp_last_commit_matching "@${who}([^a-zA-Z0-9_-]|\$)" "" "^${who}: ")"
     last_reply_by_me="$(sp_last_commit_matching "^${who}: @")"
     [ -z "$last_mention_to_me" ] && exit 0   # no one's addressed me → nothing to do
     if [ -n "$last_reply_by_me" ] && [ "$last_reply_by_me" -gt "$last_mention_to_me" ]; then
