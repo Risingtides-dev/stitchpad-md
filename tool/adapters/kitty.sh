@@ -34,6 +34,23 @@ case "$target" in
 esac
 [ -n "$sock" ] || { echo "[$(ts)] no kitty socket for @$to" >>"$log"; exit 1; }
 
+# GUARD: never inject into a FOCUSED window — that's the one you're typing in, and
+# send-text would interleave with your keystrokes. Skip; the mention stays
+# unanswered (engagement gate), so the watcher retries on the next pad change once
+# you've clicked away. Set STITCHPAD_FORCE_WAKE=1 to override.
+if [ "${STITCHPAD_FORCE_WAKE:-0}" != "1" ]; then
+  focused="$("$kitty_bin" @ --to "$sock" ls 2>/dev/null | python3 -c '
+import sys,json
+try:
+  d=json.load(sys.stdin); w=sys.argv[1]
+  print(any(str(win["id"])==w and win.get("is_focused") for o in d for t in o["tabs"] for win in t["windows"]))
+except: print(False)' "$win" 2>/dev/null)"
+  if [ "$focused" = "True" ]; then
+    echo "[$(ts)] @$to window $win is focused (you're typing) — deferring wake" >>"$log"
+    exit 0
+  fi
+fi
+
 # Short, metacharacter-free nudge; the pad holds the detail, the agent reads it.
 nudge="stitchpad: @$to you were pinged — read .stitchpad/stitchpad.md and reply with a line starting @whoever-pinged-you"
 

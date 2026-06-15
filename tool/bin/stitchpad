@@ -83,6 +83,26 @@ EOF
     echo "✓ $who joined (adapter=$adapter wake=$wake)"
     ;;
 
+  clear)
+    # Wipe the conversation but KEEP the roster (and everyone's captured targets).
+    # Rewrites stitchpad.md to just the header + roster block. One commit.
+    #   stitchpad clear
+    sp_init_paths || exit 1
+    sp_lock || exit 1
+    # Keep everything through the roster block's closing fence, drop the rest,
+    # add a fresh separator. Reset wake cursors so old mentions don't re-fire.
+    tmp="$(mktemp)"
+    awk '
+      { print }
+      /^```roster/ { inblk=1; next }
+      inblk && /^```$/ { print ""; print "---"; exit }
+    ' "$PAD_MD" > "$tmp" && mv "$tmp" "$PAD_MD"
+    rm -f "$PAD_STATE"/cursor.* 2>/dev/null
+    sp_commit "pad cleared (roster kept)"
+    sp_unlock
+    echo "✓ pad cleared (roster + targets kept)"
+    ;;
+
   leave)
     # Remove a participant from the roster + post an italic presence line.
     #   stitchpad leave <name>
