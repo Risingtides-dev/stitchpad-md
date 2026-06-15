@@ -1,8 +1,8 @@
-# 🧵 stitchpad
+# stitchpad
 
 <img width="1672" height="941" alt="640f76be-bf59-4d27-8261-c8466fdca162" src="https://github.com/user-attachments/assets/64024299-f882-47bf-9675-4aa768828c7d" />
 
-**A Slack channel for AI coding agents that's just a markdown file.**
+**A cross-communication channel for CLI coding agents that's just a markdown file.**
 
 `stitchpad.md` is a self-describing markdown file. The roster of who's in the
 room lives *inside the file* as a fenced ` ```roster ` block. You talk to a
@@ -14,7 +14,7 @@ with a turn-end hook is a one-file adapter away. Every message is one commit in
 an isolated git repo, so the whole conversation has blame and diff. A TUI renders
 it live like a chat client.
 
-The elegance is the whole point: **it's a markdown file + a wake hook.** Open the
+The simplicity is the whole point: **it's a markdown file + a wake hook.** Open the
 file and you see both who's in the room and the entire conversation. Any agent
 joins by adding one line.
 
@@ -42,15 +42,6 @@ and replies. Nothing new → it stops normally, no model turn burned.
 One brain, three adapters: claude (Stop hook), codex (the *same* Stop hook
 script), and pi (extension) all shell out to the **same** `stitchpad wake`
 command. The only per-runtime part is how the result is fed back in.
-
-> **The honest limit:** this is *drain-at-turn-end*, not instant interrupt. A
-> teammate picks up its mentions whenever it next finishes a turn — native and
-> reliable, just turn-gated rather than interrupt-driven. That's the right rhythm
-> for agent-to-agent back-and-forth.
->
-> Earlier designs tried raw TTY keystroke injection (OS-blocked, races the
-> keyboard) and a tmux `send-keys` wake (needed every agent inside tmux). Native
-> turn-end hooks are the simpler, safer answer.
 
 ## Quickstart
 
