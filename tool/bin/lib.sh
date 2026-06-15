@@ -101,7 +101,7 @@ sp_unlock() {
 # Append a small italic system/presence line to the pad (join/leave, etc.).
 # Not a message — no @sender — so it never trips mention detection or the gate.
 sp_system() {
-  local msg="$1" ts; ts="$(date '+%H:%M')"
+  local msg="$1" ts; ts="$(date '+%I:%M %p')"
   printf '\n*%s · %s*\n' "$msg" "$ts" >> "$PAD_MD"
 }
 
@@ -160,22 +160,6 @@ sp_count_to() {
   echo "${n:-0}"
 }
 
-# Index (1-based from root) of the most
-# recent message commit whose subject matches <re> — and optionally also <re2>.
-# Each say/mention is one commit with subject "<from>: <text…>", so we match that.
-# Returns "" if none. Used by the engagement gate: last mention-to-me vs last
-# reply-by-me, both as commit indices.
-sp_last_commit_matching() {
-  local re="$1" re2="${2:-}" exclude="${3:-}"
-  # Oldest→newest, numbered; keep matches; last match wins → its index.
-  # <exclude> (optional): subjects matching it are skipped — used to ignore my own
-  # authored posts so a self-mention can't count as a mention TO me (the loop bug).
-  sgit log --reverse --format='%s' 2>/dev/null | nl -ba -w1 -s$'\t' | awk -F'\t' -v re="$re" -v re2="$re2" -v ex="$exclude" '
-    $2 ~ re && (re2=="" || $2 ~ re2) && (ex=="" || $2 !~ ex) { idx=$1 }
-    END { if (idx) print idx }
-  '
-}
-
 # Extract the latest message block addressed to <name>: from the last "## "
 # header owning an @name mention, up to the next "## " header. Mentions can be
 # inline ("dale @larry ..."), but must respect handle boundaries.
@@ -187,6 +171,42 @@ sp_latest_to() {
     { lines[NR]=$0 }
     tolower($0) ~ mention { last=sub_start; end=0 }
     END { if (!end) end=NR; if (last) for (i=last;i<=end;i++) print lines[i] }
+  ' "$PAD_MD"
+}
+
+# Engagement gate derived from pad CONTENT, not git commit subjects. The watch.sh
+# daemon auto-commits the pad as "update (HH:MM:SS)", which clobbers the authored
+# "<name>: <text>" subject the old gate relied on — so git subjects are unreliable.
+# The markdown is ground truth. Walks "## @author · time" blocks in order:
+#   - a block authored by someone ELSE that @-mentions me  → a mention TO me
+#   - a block authored by ME that @-mentions anyone else   → an addressed reply
+# Prints "<last_mention_ordinal> <last_reply_ordinal>" (0 if none). Blocked iff
+# last_mention > last_reply. Author-skip is built in: my own blocks never count as
+# mentions to me, killing the self-ack loop too.
+# Silent-ack convention: a block whose first content line starts with "." or "[ack]"
+# is invisible to the gate — it neither wakes a mentioned target nor counts as an
+# addressed reply. Lets agents post acknowledgements/status without costing anyone a
+# wake. Sender opt-in, no content guessing.
+sp_engagement() {
+  local who="$1"
+  awk -v who="$(printf '%s' "$1" | tr 'A-Z' 'a-z')" '
+    function body_mentions(name,   re) { re="(^|[^a-z0-9_-])@" name "([^a-z0-9_-]|$)"; return (buf ~ re) }
+    function flush() {
+      if (author=="") return
+      n++
+      if (silent) return                                                          # silent post: ignored by the gate
+      if (author==who) { if (buf ~ /(^|[^a-z0-9_-])@[a-z0-9_-]/) last_reply=n }   # I addressed someone
+      else if (body_mentions(who)) last_mention=n                                 # someone addressed me
+    }
+    /^## @/ {
+      flush()
+      a=$2; sub(/^@/,"",a); author=tolower(a); buf=""; silent=0; seen_body=0
+      next
+    }
+    # first non-empty content line decides silent-ack (leading "." or "[ack]")
+    !seen_body && /[^[:space:]]/ { seen_body=1; if ($0 ~ /^[[:space:]]*(\.|\[ack\])/) silent=1 }
+    { buf = buf " " tolower($0) }
+    END { flush(); print (last_mention+0) " " (last_reply+0) }
   ' "$PAD_MD"
 }
 

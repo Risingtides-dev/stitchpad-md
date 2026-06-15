@@ -171,7 +171,7 @@ EOF
     [ -z "$from" ] && { echo "stitchpad: no identity — call the MCP join tool first (or set STITCHPAD_NAME for CLI/testing)" >&2; exit 1; }
     text="$*"
     [ -z "$text" ] && { echo "usage: stitchpad say <text...>  (you are @$from)" >&2; exit 1; }
-    ts="$(date '+%H:%M')"
+    ts="$(date '+%I:%M %p')"
     sp_lock || exit 1
     printf '\n## %s · %s\n\n%s\n' "@$from" "$ts" "$text" >> "$PAD_MD"
     sp_commit "$from: $(printf '%s' "$text" | tr '\n' ' ' | cut -c1-60)"
@@ -202,14 +202,15 @@ EOF
     # commit, subject "<from>: <text>"). No cursor file, no extra state — purely a
     # function of the pad. An off-topic post (no @) is not a reply, so it doesn't
     # clear the block: the hook keeps firing until I actually reply to someone.
-    # author-skip: a mention TO me must not be a post I authored myself. Commit
-    # subjects are "<from>: <text>", so exclude subjects starting "<who>:". This is
-    # what stops a self-addressed @me (or any self-post containing @me) from looking
-    # like an unanswered mention and re-firing the hook forever.
-    last_mention_to_me="$(sp_last_commit_matching "@${who}([^a-zA-Z0-9_-]|\$)" "" "^${who}: ")"
-    last_reply_by_me="$(sp_last_commit_matching "^${who}: @")"
-    [ -z "$last_mention_to_me" ] && exit 0   # no one's addressed me → nothing to do
-    if [ -n "$last_reply_by_me" ] && [ "$last_reply_by_me" -gt "$last_mention_to_me" ]; then
+    # Gate derived from pad CONTENT (message blocks), not git commit subjects —
+    # the watch.sh daemon auto-commits as "update (HH:MM:SS)" and clobbers the
+    # authored subject the old git-based gate relied on, so it could never see my
+    # replies and looped forever. sp_engagement walks "## @author" blocks: prints
+    # "<last_mention_to_me> <last_reply_by_me>" as ordinals; my own blocks never
+    # count as mentions (author-skip built in). Blocked iff mention > reply.
+    read -r last_mention_to_me last_reply_by_me <<<"$(sp_engagement "$who")"
+    [ "${last_mention_to_me:-0}" -eq 0 ] && exit 0   # no one's addressed me → nothing to do
+    if [ "${last_reply_by_me:-0}" -gt "$last_mention_to_me" ]; then
       exit 0   # my reply is newer than the mention → handled
     fi
     # Unanswered. Tell the agent it's NEW + route the reply through the MCP say tool.

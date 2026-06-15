@@ -31,11 +31,19 @@ function stitchpadBin(): string {
 export default function stitchpadExtension(pi: ExtensionAPI) {
   const bin = stitchpadBin();
   const pinned = process.env.STITCHPAD_NAME || "";
+  // Track the per-instance session key set during join (e.g. KITTY_WINDOW_ID).
+  // This lets sp_me() resolve via sessions/<key> instead of shared whoami.
+  let sessionKey = "";
 
   // Run a stitchpad CLI command in the session's cwd. `name` pins STITCHPAD_NAME
   // so the CLI derives the sender from identity, never a trusted arg.
+  // Also exports STITCHPAD_SESSION so sp_me() resolves via sessions/<key>.
   async function sp(args: string[], cwd: string, name?: string): Promise<string> {
-    const env = { ...process.env, ...(name ? { STITCHPAD_NAME: name } : {}) };
+    const env = {
+      ...process.env,
+      ...(name ? { STITCHPAD_NAME: name } : {}),
+      ...(sessionKey ? { STITCHPAD_SESSION: sessionKey } : {}),
+    };
     const { stdout, stderr } = await exec(bin, args, { cwd, timeout: 10_000, env });
     return (stdout || "") + (stderr ? `\n${stderr}` : "");
   }
@@ -59,7 +67,11 @@ export default function stitchpadExtension(pi: ExtensionAPI) {
         await exec(k, ["@", "--to", sock, "set-tab-title", "--match", `id:${win}`, `🧵 ${params.name}`]).catch(() => {});
       }
       await sp(["join", params.name, "kitty", "push", target], ctx.cwd).catch(() => {});
-      await sp(["bind-session", "-", params.name], ctx.cwd).catch(() => {});  // pad-default identity
+      // Use KITTY_WINDOW_ID as session key (not shared "-") so multiple pi
+      // agents on the same pad each get their own identity in sessions/<winid>.
+      // Falls back to shared whoami only when no kitty window is available.
+      sessionKey = win || "-";
+      await sp(["bind-session", sessionKey, params.name], ctx.cwd).catch(() => {});
       return ok(`joined as @${params.name}${target === "-" ? " (no kitty window — external wake off)" : ""}. Reply with the stitchpad_say tool.`);
     },
   });
