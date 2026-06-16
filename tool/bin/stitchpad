@@ -173,6 +173,31 @@ EOF
     [ -z "$from" ] && { echo "stitchpad: no identity — call the MCP join tool first (or set STITCHPAD_NAME for CLI/testing)" >&2; exit 1; }
     text="$*"
     [ -z "$text" ] && { echo "usage: stitchpad say <text...>  (you are @$from)" >&2; exit 1; }
+
+    # @all expansion: "@all" → every roster member, minus the sender, minus any
+    # "-@name" exclusions in the message. So "@all -@ernie -@Jill hey" wakes
+    # everyone except ernie and Jill. The -@name tokens are stripped from the
+    # posted text. Expands to explicit @mentions so the normal wake gate just works.
+    if printf '%s' "$text" | grep -qiE '(^|[[:space:]])@all([^a-zA-Z0-9_-]|$)'; then
+      # collect excluded names from -@name tokens
+      excl=" $from "   # never wake yourself
+      for tok in $text; do
+        case "$tok" in -@*) excl="$excl ${tok#-@} ";; esac
+      done
+      # build the @mention list of everyone not excluded
+      mentions=""
+      while IFS='|' read -r rn _; do
+        [ -n "$rn" ] || continue
+        case "$excl" in *" $rn "*) continue;; esac
+        # skip operators/humans — they aren't woken
+        rt="$(cat "$PAD_STATE/runtime.$rn" 2>/dev/null || true)"
+        [ "$rt" = "operator" ] || [ "$rt" = "human" ] && continue
+        mentions="$mentions @$rn"
+      done < <(sp_roster)
+      # strip the -@name exclusion tokens and the literal @all, prepend the expanded list
+      cleaned="$(printf '%s' "$text" | sed -E 's/(^|[[:space:]])-@[a-zA-Z0-9_-]+//g; s/(^|[[:space:]])@all([^a-zA-Z0-9_-]|$)/\2/Ig')"
+      text="$(printf '%s' "${mentions# } $(printf '%s' "$cleaned" | sed -E 's/^[[:space:]]+//')")"
+    fi
     ts="$(date '+%I:%M %p')"
     sp_lock || exit 1
     printf '\n## %s · %s\n\n%s\n' "@$from" "$ts" "$text" >> "$PAD_MD"
@@ -471,6 +496,15 @@ EOF
       _name="${_doc_names[_di]}"; _adapter="${_doc_adapters[_di]}"
       _wake="${_doc_wakes[_di]}"; _target="${_doc_targets[_di]}"
       issues=()
+
+      # Operator/human members are NOT agents — they read & post, they don't get
+      # woken. So they're exempt from wake-health checks (no target is expected,
+      # not a fault). Mark healthy and skip the agent diagnostics.
+      _rt="$(cat "$PAD_STATE/runtime.$_name" 2>/dev/null || true)"
+      if [ "$_rt" = "operator" ] || [ "$_rt" = "human" ]; then
+        printf '  ✓ @%s (%s) — operator\n' "$_name" "$_rt"
+        continue
+      fi
 
       # Check 1: untargeted
       if [ "$_target" = "-" ] || [ -z "$_target" ]; then
