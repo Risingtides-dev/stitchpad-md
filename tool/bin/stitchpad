@@ -3,7 +3,7 @@
 #
 #   stitchpad init [--name <pad>]         create .stitchpad/ in the current project
 #   stitchpad join <name> <adapter> [wake] [target]   add a participant to the roster
-#   STITCHPAD_NAME=<you> stitchpad say <text...>   post a message (auto-commits)
+#   STITCHPAD_NAME=<you> stitchpad say [--image <path>] <text...>   post a message (auto-commits)
 #   stitchpad read [-n N]                 print the recent conversation (plain)
 #   stitchpad meta set|get <name> <key> [value] runtime/model metadata
 #   stitchpad dnd on|off [--drain]|status silence/resume wake delivery
@@ -197,11 +197,51 @@ EOF
     sp_init_paths || exit 1
     # Sender is your pinned STITCHPAD_NAME — never an argument — so a terminal can
     # only ever post as itself. Everything after `say` is the message.
-    #   stitchpad say <text...>
+    #   stitchpad say [--image <path>] <text...>
     from="$(sp_me)"
     [ -z "$from" ] && { echo "stitchpad: no identity — call the MCP join tool first (or set STITCHPAD_NAME for CLI/testing)" >&2; exit 1; }
+    image_path=""
+    if [ "${1:-}" = "--image" ]; then
+      shift
+      image_path="${1:-}"
+      [ -n "$image_path" ] || { echo "usage: stitchpad say --image <path> [text...]" >&2; exit 1; }
+      shift
+    fi
     text="$*"
-    [ -z "$text" ] && { echo "usage: stitchpad say <text...>  (you are @$from)" >&2; exit 1; }
+    [ -z "$text" ] && [ -z "$image_path" ] && { echo "usage: stitchpad say [--image <path>] <text...>  (you are @$from)" >&2; exit 1; }
+
+    if [ -n "$image_path" ]; then
+      [ -f "$image_path" ] || { echo "stitchpad: image not found: $image_path" >&2; exit 1; }
+      case "$(file -b --mime-type "$image_path" 2>/dev/null || true)" in
+        image/png|image/jpeg|image/gif|image/webp) ;;
+        *)
+          echo "stitchpad: unsupported image type (allowed: png, jpeg, gif, webp)" >&2
+          exit 1
+          ;;
+      esac
+      size="$(stat -f %z "$image_path" 2>/dev/null || stat -c %s "$image_path" 2>/dev/null || echo 0)"
+      max_size=$((10 * 1024 * 1024))
+      [ "$size" -le "$max_size" ] || { echo "stitchpad: image too large: $size bytes (max $max_size)" >&2; exit 1; }
+      relay="${STITCHPAD_RELAY:-}"
+      token="${STITCHPAD_TOKEN:-}"
+      [ -n "$relay" ] && [ -n "$token" ] || { echo "stitchpad: --image requires STITCHPAD_RELAY and STITCHPAD_TOKEN" >&2; exit 1; }
+      pad_name="$(basename "$(dirname "$PAD_DIR")")"
+      upload_url="${relay%/}/upload-image?pad=$pad_name"
+      resp="$(curl -fsS -H "authorization: Bearer $token" -F "image=@$image_path" "$upload_url")" || {
+        echo "stitchpad: image upload failed" >&2
+        exit 1
+      }
+      image_url="$(printf '%s' "$resp" | jq -r '.url // empty' 2>/dev/null || true)"
+      [ -n "$image_url" ] || { echo "stitchpad: image upload response missing url" >&2; exit 1; }
+      alt="$(basename "$image_path" | tr -d '[]()' | tr '\n\r' '  ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+      [ -n "$alt" ] || alt="image"
+      image_md="![$alt]($image_url)"
+      if [ -n "$text" ]; then
+        text="$(printf '%s\n\n%s' "$text" "$image_md")"
+      else
+        text="$image_md"
+      fi
+    fi
 
     # @all expansion: "@all" → every roster member, minus the sender, minus any
     # "-@name" exclusions in the message. So "@all -@ernie -@Jill hey" wakes
