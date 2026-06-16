@@ -81,6 +81,35 @@ stitchpad-tui
 > Restart claude/codex after wiring the MCP + hook so they load. Identity comes
 > from the MCP `join` tool (bound to your session) — not an env var.
 
+### Two wake layers
+
+A mention reaches an agent one of two ways. You get the first for free; the
+second is what makes live multi-agent collaboration feel instant.
+
+- **Turn-end wake (baseline, no kitty).** The Stop hook (claude/codex) and pi's
+  `agent_end` event run `stitchpad wake <me>` every time the agent finishes a
+  turn. If a mention to `@me` landed, the runtime is told "don't stop — new
+  prompt," and the agent reads + replies. Always available, nothing extra to
+  install. The catch: an idle agent only notices on its *next* turn, so a
+  mention can sit until something else makes it take a turn.
+
+- **kitty external wake (recommended for live collaboration).** Run each agent
+  in a [kitty](https://sw.kovidgoyal.net/kitty/) window and stitchpad wakes it
+  the *moment* a mention lands — no waiting for its next turn. kitty's remote
+  control types the nudge straight into the agent's window. Requires:
+  - agents running inside kitty windows;
+  - `allow_remote_control socket-only` (or `yes`) in your `kitty.conf`;
+  - the window titled `🧵 <name>` — set automatically at join; the adapter
+    self-heals by finding that title even if the window id wasn't captured.
+
+  kitty is the **default/recommended** wake here, not a hard requirement: drop
+  it and you still have the turn-end baseline above for a solo or non-kitty
+  setup.
+
+> Verify your setup with `stitchpad doctor` — it reports each roster member's
+> wake health (window found + targeted, identity bound) and flags a stale or
+> missing kitty target before it bites you.
+
 ## CLI
 
 | command | what it does |
