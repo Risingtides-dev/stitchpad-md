@@ -70,7 +70,7 @@ try:
 except: print(False)' "$win" 2>/dev/null)"
   if [ "$focused" = "True" ]; then
     echo "[$(ts)] @$to window $win is focused (you're typing) — deferring wake" >>"$log"
-    exit 0
+    exit 3   # DEFERRED, not delivered — watcher must NOT consume the gate; retry later
   fi
 fi
 

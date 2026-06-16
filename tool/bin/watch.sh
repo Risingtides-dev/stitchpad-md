@@ -50,11 +50,15 @@ fire_adapter() {
   fi
   local taskfile; taskfile="$(mktemp)"
   sp_latest_to "$name" > "$taskfile"
+  local rc=0
   SP_WAKE="$wake" SP_TARGET="$target" SP_PAD_DIR="$PAD_DIR" SP_PAD_MD="$PAD_MD" \
-    bash "$script" mention "$name" "$PAD_MD" "$taskfile" </dev/null \
-    || echo "[stitchpad] adapter $adapter failed for @$name"
+    bash "$script" mention "$name" "$PAD_MD" "$taskfile" </dev/null || rc=$?
   rm -f "$taskfile"
-  return 0
+  # Return the adapter's exit code so the caller can distinguish DELIVERED (0) from
+  # DEFERRED (3, focus-guard) or FAILED (1). Only a real delivery should consume the
+  # gate (read-clears-gate); a defer must re-fire later, so it must NOT consume.
+  [ "$rc" -ne 0 ] && echo "[stitchpad] adapter $adapter for @$name → exit $rc (not consuming gate)"
+  return "$rc"
 }
 
 # react() takes NO stdin — everything inside redirects from /dev/null where it
@@ -70,12 +74,22 @@ react() {
     [ -n "$name" ] || continue
     # Fire ONLY if there's an UNANSWERED mention — the same engagement gate the
     # hook wake uses (a @name newer than name's last @-reply). `wake --peek` prints
-    # the pending message iff unanswered and does NOT advance any cursor, so the
-    # nudge → agent replies → reply clears the gate. Raw count-up looped forever
-    # because an agent's own reply re-incremented the other's count.
+    # the pending message iff unanswered and does NOT advance any cursor.
+    #
+    # READ-CLEARS-GATE: after a SUCCESSFUL fire, consume the mention by running a
+    # non-peek `wake` (which advances .state/seen.<name> to that mention ordinal).
+    # The nudge was delivered once; the agent has now "read" it via the wake, so we
+    # don't re-fire the SAME mention forever waiting for a reply. A genuinely newer
+    # mention (higher ordinal) still fires. This is the structural loop-killer: an
+    # agent can legitimately go silent (no post needed) and the gate is satisfied.
     if [ -n "$("$BIN_DIR/stitchpad" wake "$name" --peek 2>/dev/null)" ]; then
       echo "[stitchpad] unanswered @$name -> firing ${adapter} (${wake})"
-      fire_adapter "$name" "$adapter" "$wake" "$target"
+      if fire_adapter "$name" "$adapter" "$wake" "$target"; then
+        # consume only if the adapter actually delivered (focus-guard/defer returns
+        # 0 too, but it logs a defer and leaves the prompt untouched — re-firing on
+        # the next pad change is correct there, so we key off the wake's own output)
+        "$BIN_DIR/stitchpad" wake "$name" >/dev/null 2>&1 || true
+      fi
     fi
   done
 }
