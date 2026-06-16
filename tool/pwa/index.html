@@ -99,10 +99,20 @@ let me=localStorage.getItem("sp_me")||"smaths";
 let TOKEN=localStorage.getItem("sp_token")||"";
 let pad=localStorage.getItem("sp_pad")||"";
 const api=(p,o={})=>fetch(RELAY+p,{...o,headers:{authorization:"Bearer "+TOKEN,"content-type":"application/json",...(o.headers||{})}});
-// MUST mirror tool/bin/stitchpad exactly (override map + PAL + char-sum hash).
+// SINGLE SOURCE OF TRUTH: colors come from the relay's pad.colors (= `stitchpad
+// color --all`, override-aware). The local OVR/PAL below is ONLY an offline fallback
+// for when /pad hasn't loaded yet — so the web client can't drift from the terminals.
 const OVR={smaths:"#f5f5f5",randy:"#0d9488",dale:"#00d000",larry:"#e01010",ernie:"#9b30ff",dennis:"#ff8c00",Jill:"#ff1493",mark:"#ffd700"};
 const PAL=["#00afff","#ff8700","#5fff00","#d75fff","#ffaf00","#00ffff","#ff00af","#ffd700","#87ffff","#af87ff","#ff5faf","#5fff5f","#ff5fff","#87d787","#d7af5f","#ffff00","#5fffff","#ff87ff","#afffaf","#afffff"];
-const colorFor=n=>OVR[n]||PAL[[...(n||"")].reduce((s,c)=>s+c.charCodeAt(0),0)%PAL.length];
+let RELAY_COLORS={};   // name->hex from the latest /pad fetch (the source of truth)
+// Accept either shape the relay might send: flat {name:hex} OR [{name,color}].
+function setRelayColors(c){
+  const m={};
+  if(Array.isArray(c)) c.forEach(e=>{if(e&&e.name)m[e.name]=e.color||e.hex;});
+  else if(c&&typeof c==="object") Object.assign(m,c);
+  RELAY_COLORS=m;
+}
+const colorFor=n=>RELAY_COLORS[n]||OVR[n]||PAL[[...(n||"")].reduce((s,c)=>s+c.charCodeAt(0),0)%PAL.length];
 // readable text/name color: dark ink on light backgrounds (e.g. smaths=white), else the color itself
 const lum=h=>{const c=h.replace("#","");const r=parseInt(c.slice(0,2),16),g=parseInt(c.slice(2,4),16),b=parseInt(c.slice(4,6),16);return(0.299*r+0.587*g+0.114*b)/255;};
 const onLight=n=>lum(colorFor(n))>0.85;          // true when the author color is near-white
@@ -142,6 +152,7 @@ async function render(){
   if(!pad)return;
   document.getElementById("chTitle").textContent="# "+pad;
   const r=await api("/pad?pad="+encodeURIComponent(pad)); if(!r.ok)return; const d=await r.json();
+  setRelayColors(d.colors);   // single source of truth — relay's stitchpad-color table
   ROSTER=(d.roster||[]).map(m=>m.name); FILES=d.files||[];
   document.getElementById("chMeta").textContent=(d.roster||[]).length+" members";
   const log=document.getElementById("log"), atBottom=log.scrollHeight-log.scrollTop-log.clientHeight<80;
