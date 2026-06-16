@@ -33,6 +33,10 @@ html,body{margin:0;height:100%;font:15px/1.46 -apple-system,system-ui,"Segoe UI"
 #top .name{font-weight:800;font-size:17px}#top .meta{color:var(--ink-dim);font-size:13px}
 #statusbar{display:flex;align-items:center;gap:10px;padding:6px 16px;background:var(--panel);border-bottom:1px solid var(--edge);font-size:12px;color:var(--dim);overflow-x:auto;white-space:nowrap}
 #statusbar:empty{display:none}
+#claimbar{display:flex;flex-wrap:wrap;gap:6px;padding:5px 16px;background:#2a2410;border-bottom:1px solid var(--edge);font-size:12px}
+#claimbar:empty{display:none}
+#claimbar .claim{display:flex;align-items:center;gap:5px;color:#e8c97a}
+#claimbar .claim b{color:#fff}
 #statusbar .count{flex:0 0 auto}
 #statusbar .dots{display:flex;gap:5px;align-items:center}
 #statusbar .sb-dot{width:11px;height:11px;border-radius:50%;cursor:pointer;border:1.5px solid transparent;position:relative}
@@ -126,6 +130,7 @@ html,body{margin:0;height:100%;font:15px/1.46 -apple-system,system-ui,"Segoe UI"
   <div id="main">
     <div id="top"><button id="hamb">☰</button><span class="name" id="chTitle"># …</span><span class="meta" id="chMeta"></span></div>
     <div id="statusbar"></div>
+    <div id="claimbar"></div>
     <div id="log"></div>
     <div id="cwrap"><div id="ac"></div><div id="composer"><textarea id="text" rows="1" placeholder="Message…"></textarea><button id="send">➤</button></div><div class="tags" id="tags">you are @smaths · type @name to address agents</div></div>
   </div>
@@ -213,7 +218,8 @@ async function render(){
   setRelayColors(d.colors);   // single source of truth — relay's stitchpad-color table
   ROSTER=(d.roster||[]).map(m=>m.name); FILES=d.files||[];
   ROSTER_INFO={}; (d.roster||[]).forEach(m=>{ROSTER_INFO[m.name]=m;}); PROFILES=d.profiles||{};  // for agent cards
-  renderDMList(); renderStatusBar();
+  CLAIMS=d.claims||[];
+  renderDMList(); renderStatusBar(); renderClaimBar();
   document.getElementById("chMeta").textContent=dmWith?"direct message":((d.roster||[]).length+" members");
   const log=document.getElementById("log"), atBottom=log.scrollHeight-log.scrollTop-log.clientHeight<80;
   let msgs=parse(d.pad);
@@ -227,7 +233,18 @@ async function render(){
   log.innerHTML=msgs.map(b=>b.sys?`<div class="sys">${esc(b.sys)}</div>`:rowHtml(b)).join("")+PENDING.map(pendHtml).join("");
   if(atBottom)log.scrollTop=log.scrollHeight;
 }
-let ROSTER=[],FILES=[],PENDING=[],ROSTER_INFO={},PROFILES={},dmWith="";
+let ROSTER=[],FILES=[],PENDING=[],ROSTER_INFO={},PROFILES={},CLAIMS=[],dmWith="";
+// File-write claims telemetry: "✏️ @x editing <file>" — shows who holds a write
+// lease so we can SEE the locks. Reads pad.claims (from `stitchpad claims` via bridge).
+// Tolerant of shape: [{holder,file,age}] or {file:holder}.
+function renderClaimBar(){
+  const el=document.getElementById("claimbar"); if(!el)return;
+  let list=[];
+  if(Array.isArray(CLAIMS)) list=CLAIMS.map(c=>({who:c.holder||c.name||c.who,file:c.file||c.path,age:c.age}));
+  else if(CLAIMS&&typeof CLAIMS==="object") list=Object.entries(CLAIMS).map(([file,who])=>({who,file}));
+  list=list.filter(c=>c.who&&c.file);
+  el.innerHTML=list.map(c=>`<span class="claim">✏️ <b style="color:${colorFor(c.who)}">@${esc(c.who)}</b> editing ${esc(c.file)}${c.age?` · ${esc(String(c.age))}`:""}</span>`).join("");
+}
 // Direct Messages list in the sidebar (below Stitchpads). Tap an agent → DM view.
 function renderDMList(){
   const el=document.getElementById("dmlist"); if(!el)return;
