@@ -393,13 +393,12 @@ EOF
       _taken[$idx]=1
       _color_map[$_n]="${_phex[$idx]}"
     done
-    if [ "${1:-}" = "--all" ]; then
+    if [ -z "${1:-}" ] || [ "${1:-}" = "--all" ]; then
       for _n in "${_names[@]}"; do
         printf '%s %s\n' "$_n" "${_color_map[$_n]}"
       done
     else
-      who="${1:?usage: stitchpad color <name> | --all}"
-      echo "${_color_map[$who]:-#808080}"
+      echo "${_color_map[$1]:-#808080}"
     fi
     ;;
 
