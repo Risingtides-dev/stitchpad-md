@@ -220,7 +220,10 @@ sp_engagement() {
     infence { next }
     # first non-empty content line decides silent-ack (leading "." or "[ack]")
     !seen_body && /[^[:space:]]/ { seen_body=1; if ($0 ~ /^[[:space:]]*(\.|\[ack\])/) silent=1 }
-    { buf = buf " " tolower($0) }
+    # Strip inline code (`...`) before appending to buffer — prevents `@name` in code
+    # snippets from counting as an address. Real addresses survive because only the
+    # backtick-delimited content is blanked, not the surrounding text.
+    { line = tolower($0); gsub(/`[^`]*`/, " ", line); buf = buf " " line }
     END { flush(); print (last_mention+0) " " (last_reply+0) }
   ' "$PAD_MD"
 }
