@@ -51,10 +51,9 @@ while :; do
         _role="$(head -1 "$_persona_file" | sed 's/^# //')"
         _persona="$(cat "$_persona_file" | head -5 | tail -4)"
       fi
-      # Get harness info
-      _harness_info="$(cd "$proj" && "$SP" harness "$_name" 2>/dev/null || echo '')"
-      _harness="$(echo "$_harness_info" | grep -o 'harness=[^ ]*' | cut -d= -f2 | head -1 || echo '')"
-      profiles="$(echo "$profiles" | jq --arg n "$_name" --arg m "$_model" --arg r "$_role" --arg p "$_persona" --argjson s "${_skills:-[]}" --arg h "$_harness" \
+      # Get adapter from roster entry
+      _adapter="$(echo "$roster" | jq -r '.[] | select(.name=="'"$_name"'") | .adapter // ""' 2>/dev/null || echo '')"
+      profiles="$(echo "$profiles" | jq --arg n "$_name" --arg m "$_model" --arg r "$_role" --arg p "$_persona" --argjson s "${_skills:-[]}" --arg h "$_adapter" \
         '. + {($n): {role:$r, persona:$p, skills:$s, model:$m, harness:$h}}')"
     done
     # push this pad up (markdown + roster + files + colors + profiles)
