@@ -31,6 +31,14 @@ html,body{margin:0;height:100%;font:15px/1.46 -apple-system,system-ui,"Segoe UI"
 #main{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--col)}
 #top{display:flex;align-items:center;gap:8px;padding:12px 16px;padding-top:calc(12px + env(safe-area-inset-top));background:var(--paper);border-bottom:1px solid var(--paper-edge);color:var(--ink)}
 #top .name{font-weight:800;font-size:17px}#top .meta{color:var(--ink-dim);font-size:13px}
+#statusbar{display:flex;align-items:center;gap:10px;padding:6px 16px;background:var(--panel);border-bottom:1px solid var(--edge);font-size:12px;color:var(--dim);overflow-x:auto;white-space:nowrap}
+#statusbar:empty{display:none}
+#statusbar .count{flex:0 0 auto}
+#statusbar .dots{display:flex;gap:5px;align-items:center}
+#statusbar .sb-dot{width:11px;height:11px;border-radius:50%;cursor:pointer;border:1.5px solid transparent;position:relative}
+#statusbar .sb-dot:hover{border-color:var(--txt)}
+#statusbar .sb-dot.working{box-shadow:0 0 0 2px rgba(46,160,67,.35)}
+#statusbar .sb-dot.dnd{opacity:.55}
 #log{flex:1;overflow-y:auto;padding:12px 0 8px}
 .row{display:flex;gap:10px;padding:7px 16px;position:relative}
 .row:hover{background:var(--hover)}
@@ -117,6 +125,7 @@ html,body{margin:0;height:100%;font:15px/1.46 -apple-system,system-ui,"Segoe UI"
   </div>
   <div id="main">
     <div id="top"><button id="hamb">☰</button><span class="name" id="chTitle"># …</span><span class="meta" id="chMeta"></span></div>
+    <div id="statusbar"></div>
     <div id="log"></div>
     <div id="cwrap"><div id="ac"></div><div id="composer"><textarea id="text" rows="1" placeholder="Message…"></textarea><button id="send">➤</button></div><div class="tags" id="tags">you are @smaths · type @name to address agents</div></div>
   </div>
@@ -204,7 +213,7 @@ async function render(){
   setRelayColors(d.colors);   // single source of truth — relay's stitchpad-color table
   ROSTER=(d.roster||[]).map(m=>m.name); FILES=d.files||[];
   ROSTER_INFO={}; (d.roster||[]).forEach(m=>{ROSTER_INFO[m.name]=m;}); PROFILES=d.profiles||{};  // for agent cards
-  renderDMList();
+  renderDMList(); renderStatusBar();
   document.getElementById("chMeta").textContent=dmWith?"direct message":((d.roster||[]).length+" members");
   const log=document.getElementById("log"), atBottom=log.scrollHeight-log.scrollTop-log.clientHeight<80;
   let msgs=parse(d.pad);
@@ -232,6 +241,22 @@ function renderDMList(){
 }
 function openDM(n){dmWith=n;localStorage.setItem("sp_dm",n);document.getElementById("chans").classList.remove("open");render();}
 function closeDM(){dmWith="";localStorage.removeItem("sp_dm");render();}
+// Presence strip under the header: count + a row of colored status dots (tap → card).
+// status from PROFILES[name].status: dnd | working | available (idle→available).
+function renderStatusBar(){
+  const el=document.getElementById("statusbar"); if(!el)return;
+  const agents=ROSTER.filter(n=>PROFILES[n]||ROSTER_INFO[n]);
+  if(!agents.length){el.innerHTML="";return;}
+  let working=0,avail=0,dnd=0;
+  const dots=agents.map(n=>{
+    const st=(PROFILES[n]||{}).status||"available";
+    if(st==="working")working++; else if(st==="dnd")dnd++; else avail++;
+    const title=`@${n} · ${st}`;
+    return `<span class="sb-dot card-trigger ${st}" data-agent="${esc(n)}" title="${esc(title)}" style="background:${colorFor(n)}"></span>`;
+  }).join("");
+  const parts=[]; if(working)parts.push(working+" working"); if(avail)parts.push(avail+" available"); if(dnd)parts.push(dnd+" dnd");
+  el.innerHTML=`<span class="count">${parts.join(" · ")||agents.length+" agents"}</span><span class="dots">${dots}</span>`;
+}
 const ta=document.getElementById("text"),acEl=document.getElementById("ac");
 let ac={open:false,kind:null,start:0,items:[],sel:0};
 
