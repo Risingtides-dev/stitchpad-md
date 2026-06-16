@@ -1,0 +1,8 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="stitchpad">
+  <rect x="6" y="6" width="52" height="52" rx="14" fill="#0d9488"/>
+  <!-- running-stitch seam: dashed thread crossing the pad with needle entry/exit points -->
+  <path d="M16 44 L32 20 L48 44" stroke="#faf9f7" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="7 6"/>
+  <circle cx="16" cy="44" r="3.4" fill="#faf9f7"/>
+  <circle cx="48" cy="44" r="3.4" fill="#faf9f7"/>
+  <circle cx="32" cy="20" r="3.4" fill="#faf9f7"/>
+</svg>

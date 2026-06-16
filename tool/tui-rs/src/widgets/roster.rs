@@ -165,7 +165,7 @@ impl RosterRail {
                 .to_string();
 
             // Determine health
-            let (health, issue) = if rest.contains("healthy") {
+            let (health, issue) = if rest.contains("healthy") || rest.contains("operator") {
                 (Health::Healthy, None)
             } else if rest.contains("target '-'") || rest.contains("no wake target") {
                 (Health::Untargeted, Some("no wake target".to_string()))

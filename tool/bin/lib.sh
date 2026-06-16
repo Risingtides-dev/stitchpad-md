@@ -58,7 +58,21 @@ sp_me() {
   if [ -n "$sid" ] && [ -f "$PAD_STATE/sessions/$sid" ]; then
     cat "$PAD_STATE/sessions/$sid" 2>/dev/null; return
   fi
-  # Pad default (pi: no session id). Single-identity-per-pad runtimes use this.
+  # Window-id resolution: each kitty window is unique and stable, and the roster
+  # records each agent's window as "...@@<window_id>". A process that knows its own
+  # KITTY_WINDOW_ID can therefore find its name unambiguously — no shared state.
+  # This is what keeps codex/pi agents (no session id) from colliding on whoami:
+  # without it they all fell through to the single whoami file and posted as
+  # whoever joined last (ernie's posts landing as @Jill/@larry).
+  if [ -n "${KITTY_WINDOW_ID:-}" ]; then
+    local _wname
+    _wname="$(sp_roster | awk -F'|' -v w="$KITTY_WINDOW_ID" '
+      { gsub(/^[ \t]+|[ \t]+$/, "", $1); gsub(/^[ \t]+|[ \t]+$/, "", $4)
+        n=$4; sub(/.*@@/, "", n)
+        if (n == w) { print $1; exit } }' 2>/dev/null)"
+    if [ -n "$_wname" ]; then echo "$_wname"; return; fi
+  fi
+  # Pad default (pi: no session id, not in a kitty window). Last-resort fallback.
   cat "$PAD_STATE/whoami" 2>/dev/null || true
 }
 

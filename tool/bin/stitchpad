@@ -152,10 +152,18 @@ EOF
       printf '%s' "$nm" > "$PAD_STATE/sessions/$sid"
       echo "✓ bound session $sid → @$nm"
     fi
+    # Auto-detect the model from the agent's own env (runs in-process, so each
+    # harness's vars are visible). Only writes if we find one — never guesses.
+    _model="${STITCHPAD_MODEL:-${ANTHROPIC_MODEL:-${CODEX_MODEL:-${OPENAI_MODEL:-${PI_MODEL:-}}}}}"
+    if [ -n "$_model" ]; then
+      printf '%s' "$_model" > "$PAD_STATE/model.$nm"
+      echo "✓ model for @$nm: $_model"
+    fi
     # Auto-capture this kitty window as the wake target if we're in one and the
     # roster target is still empty. Runs in the agent's process, so it sees the
     # window env even when the MCP join didn't pass it through (the codex case).
     if [ -n "${KITTY_LISTEN_ON:-}" ] && [ -n "${KITTY_WINDOW_ID:-}" ]; then
+      _kitty="$(command -v kitty || echo kitty)"
       cur="$(sp_user_field "$nm" target)"
       if [ -z "$cur" ] || [ "$cur" = "-" ]; then
         sp_lock || exit 0
@@ -171,8 +179,16 @@ EOF
         ' "$PAD_MD" > "$tmp" && mv "$tmp" "$PAD_MD"
         sp_commit "roster: @$nm kitty target captured"
         sp_unlock
-        "$(command -v kitty || echo kitty)" @ --to "$KITTY_LISTEN_ON" set-window-title --match "id:$KITTY_WINDOW_ID" "🧵 $nm" 2>/dev/null || true
         echo "✓ captured kitty target for @$nm ($tgt)"
+      fi
+      # Force window title + background color to the roster identity on EVERY bind,
+      # so terminal-bg == roster color, 1:1, no drift. Color is the single source
+      # (`stitchpad color`); title carries the 🧵 <name> the self-heal looks for.
+      "$_kitty" @ --to "$KITTY_LISTEN_ON" set-window-title --match "id:$KITTY_WINDOW_ID" "🧵 $nm" 2>/dev/null || true
+      _bg="$("$BIN_DIR/stitchpad" color "$nm" 2>/dev/null)"
+      if [ -n "$_bg" ]; then
+        "$_kitty" @ --to "$KITTY_LISTEN_ON" set-colors --match "id:$KITTY_WINDOW_ID" "background=$_bg" 2>/dev/null \
+          && echo "✓ window color for @$nm → $_bg"
       fi
     fi
     ;;
@@ -421,8 +437,8 @@ EOF
 
     # FIXED 1:1 color map — explicit, maximally distinct, no hash, no drift.
     declare -A _overrides=(
-      [smaths]='#1e90ff'   # blue — the human (your input box posts as @smaths)
-      [randy]='#00ffd7'    # teal — orchestrator (was john)
+      [smaths]='#f5f5f5'   # white — the human (your input box posts as @smaths)
+      [randy]='#0d9488'    # teal — orchestrator (was john); = brand accent
       [dale]='#00d000'     # green
       [larry]='#e01010'    # red
       [ernie]='#9b30ff'    # purple

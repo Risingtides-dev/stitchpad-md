@@ -17,8 +17,15 @@ export default {
     const url = new URL(req.url);
     if (req.method === "OPTIONS") return new Response(null, { headers: cors });
 
-    // Non-API paths → serve the PWA static assets (index.html, manifest, sw.js).
-    const API = ["/pads", "/pad", "/push", "/say", "/outbox"];
+    // Login: exchange username+password (checked against secrets) for the bearer token.
+    if (url.pathname === "/login" && req.method === "POST") {
+      const { user, pass } = await req.json().catch(() => ({}));
+      if (user === env.STITCHPAD_USER && pass === env.STITCHPAD_PASS) return json({ token: env.STITCHPAD_TOKEN });
+      return json({ error: "bad credentials" }, 401);
+    }
+
+    // Non-API paths → serve the PWA static assets (index.html, manifest).
+    const API = ["/login", "/pads", "/pad", "/push", "/say", "/outbox"];
     if (!API.includes(url.pathname)) {
       return env.ASSETS ? env.ASSETS.fetch(req) : json({ error: "no assets" }, 404);
     }

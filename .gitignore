@@ -10,3 +10,6 @@
 
 # rust build artifacts
 tool/tui-rs/target/
+
+# stray test runtime under tool/
+tool/.state/
