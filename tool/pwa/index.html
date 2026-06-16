@@ -68,6 +68,7 @@ html,body{margin:0;height:100%;font:15px/1.46 -apple-system,system-ui,"Segoe UI"
 .bubble .who{font-weight:800}.bubble .ts{color:var(--dim);font-size:12px}
 .bubble .bd{white-space:pre-wrap;word-wrap:break-word;margin-top:1px}
 .bubble .bd a{color:#1d9bd1}
+.msg-img{max-width:min(360px,100%);max-height:280px;border-radius:8px;margin:6px 0;display:block;border:1px solid var(--edge)}
 .bubble code{background:#1e2129;border:1px solid var(--edge);border-radius:5px;padding:1px 5px;font-size:13px}
 .bubble pre{background:#1e2129;border:1px solid var(--edge);border-radius:8px;padding:10px;overflow:auto;font-size:13px;margin:0}
 .cb{position:relative;margin:6px 0}
@@ -157,6 +158,11 @@ function fmt(t){
   t=esc(t);
   t=t.replace(/```([\s\S]*?)```/g,(m,c)=>`<div class="cb"><button class="cpy" title="copy">copy</button><pre>${c.trim()}</pre></div>`);
   t=t.replace(/`([^`]+)`/g,'<code>$1</code>');
+  // markdown image — ONLY ![alt](http(s)://...) → <img>. Anchored to http(s) URLs so
+  // no js:/data: src; alt is already entity-escaped by esc() above (no HTML breakout).
+  // Must run BEFORE the autolink so the url inside ()s isn't turned into an <a> first.
+  // ponytail: remote-img beacon (viewer IP) accepted for v0; relay-proxy /img?u= later.
+  t=t.replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g,(m,alt,url)=>`<img class="msg-img" src="${url}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">`);
   t=t.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');
   t=t.replace(/(https?:\/\/[^\s]+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>');
   t=t.replace(/(^|[\s(])@([a-zA-Z0-9_-]+)/g,(m,p,n)=>`${p}<b style="color:${colorFor(n)}">@${n}</b>`);
