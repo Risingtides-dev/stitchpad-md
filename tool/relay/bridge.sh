@@ -40,13 +40,16 @@ while :; do
     colors="$(cd "$proj" && "$SP" color --all 2>/dev/null | jq -R 'split(" ") | {(.[0]): .[1]}' | jq -sc 'add // {}' 2>/dev/null || echo '{}')"
     # collect per-agent profiles (role, persona, skills, model, harness)
     profiles='{}'
-    for _name in $(echo "$roster" | jq -r '.[].name' 2>/dev/null); do
+    # $roster is the raw "{...},{...}" fragment (no brackets until the push), so wrap
+    # it into a JSON array before iterating — bare it fails jq and the loop never runs.
+    for _name in $(echo "[$roster]" | jq -r '.[].name' 2>/dev/null); do
       _model="$(cat "$padd/.state/model.$_name" 2>/dev/null || echo '')"
       _persona=""
       _skills='[]'
       _role=''
-      # Try to read persona from tool/personas/<name>.md
-      _persona_file="$proj/tool/personas/$(echo "$_name" | tr '[:upper:]' '[:lower:]').md"
+      # Try to read persona from stitchpad install (not pad dir)
+      _persona_dir="${STITCHPAD_HOME:-$HOME/.stitchpad}/tool/personas"
+      _persona_file="$_persona_dir/$(echo "$_name" | tr '[:upper:]' '[:lower:]').md"
       if [ -f "$_persona_file" ]; then
         _role="$(grep -m1 '^ROLE:' "$_persona_file" | sed 's/^ROLE:[[:space:]]*//')"
         [ -z "$_role" ] && _role="$(head -1 "$_persona_file" | sed 's/^# //')"
@@ -74,7 +77,7 @@ print(json.dumps(skills))
         [ -z "$_skills" ] && _skills='[]'
       fi
       # Get adapter from roster entry
-      _adapter="$(echo "$roster" | jq -r '.[] | select(.name=="'"$_name"'") | .adapter // ""' 2>/dev/null || echo '')"
+      _adapter="$(echo "[$roster]" | jq -r '.[] | select(.name=="'"$_name"'") | .adapter // ""' 2>/dev/null || echo '')"
       # Derive status: dnd > working > available > idle
       _status="available"
       if [ -f "$padd/.state/dnd.$_name" ]; then
