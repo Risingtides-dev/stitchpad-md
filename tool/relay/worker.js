@@ -27,7 +27,7 @@ export default {
 
     // Non-API paths → serve the PWA static assets (index.html, manifest).
     const API = ["/login", "/pads", "/pad", "/pad.colors", "/push", "/say", "/outbox", "/upload-image"];
-    if (!API.includes(url.pathname)) {
+    if (!API.includes(url.pathname) && !url.pathname.startsWith("/img/")) {
       return env.ASSETS ? env.ASSETS.fetch(req) : json({ error: "no assets" }, 404);
     }
     const tok = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
@@ -113,6 +113,16 @@ export default {
       // Construct public URL (R2 dev URL)
       const publicUrl = `https://pub-ac6a4a8a53874251ae65685bf1c45fe9.r2.dev/${r2Key}`;
       return json({ url: publicUrl, sha, mime: file.type, size: file.size });
+    }
+    // Serve images from R2
+    if (url.pathname.startsWith("/img/") && req.method === "GET") {
+      const key = "images/" + url.pathname.slice(5);
+      const obj = await env.IMAGES.get(key);
+      if (!obj) return json({ error: "not found" }, 404);
+      const headers = new Headers(cors);
+      headers.set("content-type", obj.httpMetadata?.contentType || "application/octet-stream");
+      headers.set("cache-control", "public, max-age=31536000");
+      return new Response(obj.body, { headers });
     }
     return json({ error: "not found" }, 404);
   },
