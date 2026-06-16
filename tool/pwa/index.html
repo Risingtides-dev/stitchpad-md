@@ -33,7 +33,8 @@ html,body{margin:0;height:100%;font:15px/1.46 -apple-system,system-ui,"Segoe UI"
 .row:hover .row-cpy{opacity:1}
 .row-cpy:hover{color:var(--txt)}
 .row-cpy.done{color:#2ea043;border-color:#2ea043}
-.av{width:36px;height:36px;border-radius:9px;flex:0 0 36px;display:flex;align-items:center;justify-content:center;font-weight:800;color:#fff;font-size:14px}
+.av{position:relative;width:36px;height:36px;border-radius:9px;flex:0 0 36px;display:flex;align-items:center;justify-content:center;font-weight:800;color:#fff;font-size:14px;overflow:hidden}
+.av img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 .bubble{min-width:0;flex:1}
 .bubble .hd{display:flex;align-items:baseline;gap:8px}
 .bubble .who{font-weight:800}.bubble .ts{color:var(--dim);font-size:12px}
@@ -95,11 +96,18 @@ let TOKEN=localStorage.getItem("sp_token")||"";
 let pad=localStorage.getItem("sp_pad")||"";
 const api=(p,o={})=>fetch(RELAY+p,{...o,headers:{authorization:"Bearer "+TOKEN,"content-type":"application/json",...(o.headers||{})}});
 // MUST mirror tool/bin/stitchpad exactly (override map + PAL + char-sum hash).
-const OVR={smaths:"#1e90ff",randy:"#00ffd7",dale:"#00d000",larry:"#e01010",ernie:"#9b30ff",dennis:"#ff8c00",Jill:"#ff1493",mark:"#ffd700"};
+const OVR={smaths:"#f5f5f5",randy:"#0d9488",dale:"#00d000",larry:"#e01010",ernie:"#9b30ff",dennis:"#ff8c00",Jill:"#ff1493",mark:"#ffd700"};
 const PAL=["#00afff","#ff8700","#5fff00","#d75fff","#ffaf00","#00ffff","#ff00af","#ffd700","#87ffff","#af87ff","#ff5faf","#5fff5f","#ff5fff","#87d787","#d7af5f","#ffff00","#5fffff","#ff87ff","#afffaf","#afffff"];
 const colorFor=n=>OVR[n]||PAL[[...(n||"")].reduce((s,c)=>s+c.charCodeAt(0),0)%PAL.length];
+// readable text/name color: dark ink on light backgrounds (e.g. smaths=white), else the color itself
+const lum=h=>{const c=h.replace("#","");const r=parseInt(c.slice(0,2),16),g=parseInt(c.slice(2,4),16),b=parseInt(c.slice(4,6),16);return(0.299*r+0.587*g+0.114*b)/255;};
+const onLight=n=>lum(colorFor(n))>0.85;          // true when the author color is near-white
+const nameColor=n=>onLight(n)?"#e8e8e9":colorFor(n);   // name reads on dark chat
+const initInk=n=>onLight(n)?"#1a1d29":"#fff";          // initials read on the avatar square
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const initials=n=>(n||"?").slice(0,2).toUpperCase();
+// avatar: show avatars/<name>.png if it loads, else fall back to colored initials square.
+const av=n=>`<div class="av" style="background:${colorFor(n)};color:${initInk(n)}"><img src="avatars/${encodeURIComponent(n)}.png" alt="" onerror="this.onerror=null;this.src='avatars/_default.png'"><span>${initials(n)}</span></div>`;
 function fmt(t){
   t=esc(t);
   t=t.replace(/```([\s\S]*?)```/g,(m,c)=>`<div class="cb"><button class="cpy" title="copy">copy</button><pre>${c.trim()}</pre></div>`);
@@ -138,8 +146,8 @@ async function render(){
   const landed=new Set(msgs.map(b=>(b.body||[]).join("\n").trim()));
   PENDING=PENDING.filter(p=>!landed.has(p.text));
   const cpyBtn=text=>`<button class="row-cpy" title="copy message" data-copy="${btoa(unescape(encodeURIComponent(text)))}">copy</button>`;
-  const rowHtml=b=>`<div class="row">${cpyBtn(b.body.join("\n").trim())}<div class="av" style="background:${colorFor(b.who)}">${initials(b.who)}</div><div class="bubble"><div class="hd"><span class="who" style="color:${colorFor(b.who)}">${esc(b.who)}</span><span class="ts">${esc(b.t)}</span></div><div class="bd">${fmt(b.body.join("\n").trim())}</div></div></div>`;
-  const pendHtml=p=>`<div class="row pending"><div class="av" style="background:${colorFor(me)}">${initials(me)}</div><div class="bubble"><div class="hd"><span class="who" style="color:${colorFor(me)}">${esc(me)}</span><span class="ts">sending…</span></div><div class="bd">${fmt(p.text)}</div></div></div>`;
+  const rowHtml=b=>`<div class="row">${cpyBtn(b.body.join("\n").trim())}${av(b.who)}<div class="bubble"><div class="hd"><span class="who" style="color:${nameColor(b.who)}">${esc(b.who)}</span><span class="ts">${esc(b.t)}</span></div><div class="bd">${fmt(b.body.join("\n").trim())}</div></div></div>`;
+  const pendHtml=p=>`<div class="row pending">${av(me)}<div class="bubble"><div class="hd"><span class="who" style="color:${nameColor(me)}">${esc(me)}</span><span class="ts">sending…</span></div><div class="bd">${fmt(p.text)}</div></div></div>`;
   log.innerHTML=msgs.map(b=>b.sys?`<div class="sys">${esc(b.sys)}</div>`:rowHtml(b)).join("")+PENDING.map(pendHtml).join("");
   if(atBottom)log.scrollTop=log.scrollHeight;
 }
@@ -194,7 +202,7 @@ ta.addEventListener("blur",()=>setTimeout(closeAc,150));
 async function send(){const text=ta.value.trim();if(!text||!pad)return;ta.value="";autosize();closeAc();
   PENDING.push({text});                         // optimistic: show immediately
   const log=document.getElementById("log");
-  log.insertAdjacentHTML("beforeend",`<div class="row pending"><div class="av" style="background:${colorFor(me)}">${initials(me)}</div><div class="bubble"><div class="hd"><span class="who" style="color:${colorFor(me)}">${esc(me)}</span><span class="ts">sending…</span></div><div class="bd">${fmt(text)}</div></div></div>`);
+  log.insertAdjacentHTML("beforeend",`<div class="row pending">${av(me)}<div class="bubble"><div class="hd"><span class="who" style="color:${nameColor(me)}">${esc(me)}</span><span class="ts">sending…</span></div><div class="bd">${fmt(text)}</div></div></div>`);
   log.scrollTop=log.scrollHeight;
   await api("/say?pad="+encodeURIComponent(pad),{method:"POST",body:JSON.stringify({from:me,text})});setTimeout(render,400);}
 document.getElementById("send").onclick=send;
