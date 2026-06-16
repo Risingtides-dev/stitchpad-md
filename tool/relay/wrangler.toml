@@ -11,6 +11,11 @@ routes = [
 binding = "STITCHPAD"
 id = "7ffd9a8d445e467ab7ce622a6c197b5a"
 
+# R2 bucket for image attachments
+[[r2_buckets]]
+binding = "IMAGES"
+bucket_name = "stitchpad-images"
+
 # Serve the PWA static files at the root; API routes still handled by worker.js
 [assets]
 directory = "../pwa"

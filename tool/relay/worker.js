@@ -26,8 +26,8 @@ export default {
     }
 
     // Non-API paths → serve the PWA static assets (index.html, manifest).
-    const API = ["/login", "/pads", "/pad", "/pad.colors", "/push", "/say", "/outbox"];
-    if (!API.includes(url.pathname)) {
+    const API = ["/login", "/pads", "/pad", "/pad.colors", "/push", "/say", "/outbox", "/upload-image"];
+    if (!API.includes(url.pathname) && !url.pathname.startsWith("/img/")) {
       return env.ASSETS ? env.ASSETS.fetch(req) : json({ error: "no assets" }, 404);
     }
     const tok = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
@@ -74,6 +74,55 @@ export default {
       const q = JSON.parse((await env.STITCHPAD.get(qk)) || "[]");
       await env.STITCHPAD.put(qk, "[]");
       return json({ messages: q });
+    }
+    // Image upload endpoint — accepts multipart/form-data with 'image' field
+    // Returns {url, sha, w, h, mime} for embedding in the pad
+    if (url.pathname === "/upload-image" && req.method === "POST") {
+      const contentType = req.headers.get("content-type") || "";
+      if (!contentType.includes("multipart/form-data")) {
+        return json({ error: "expected multipart/form-data" }, 400);
+      }
+      const formData = await req.formData();
+      const file = formData.get("image");
+      if (!file || typeof file === "string") {
+        return json({ error: "missing 'image' field" }, 400);
+      }
+      // Validate mime type
+      const allowedMimes = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+      if (!allowedMimes.includes(file.type)) {
+        return json({ error: `invalid mime type: ${file.type}. Allowed: ${allowedMimes.join(", ")}` }, 400);
+      }
+      // Validate size (10MB max)
+      const maxSize = 10 * 1024 * 1024;
+      if (file.size > maxSize) {
+        return json({ error: `file too large: ${file.size} bytes (max ${maxSize})` }, 400);
+      }
+      // Compute SHA-256 hash for dedupe
+      const arrayBuffer = await file.arrayBuffer();
+      const hashBuffer = await crypto.subtle.digest("SHA-256", arrayBuffer);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      const sha = hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+      // R2 key: images/<sha>.<ext>
+      const ext = file.name.split(".").pop() || "png";
+      const r2Key = `images/${sha}.${ext}`;
+      // Upload to R2
+      await env.IMAGES.put(r2Key, arrayBuffer, {
+        httpMetadata: { contentType: file.type },
+        customMetadata: { originalName: file.name, uploadedAt: new Date().toISOString() }
+      });
+      // Construct public URL (R2 dev URL)
+      const publicUrl = `https://pub-ac6a4a8a53874251ae65685bf1c45fe9.r2.dev/${r2Key}`;
+      return json({ url: publicUrl, sha, mime: file.type, size: file.size });
+    }
+    // Serve images from R2
+    if (url.pathname.startsWith("/img/") && req.method === "GET") {
+      const key = "images/" + url.pathname.slice(5);
+      const obj = await env.IMAGES.get(key);
+      if (!obj) return json({ error: "not found" }, 404);
+      const headers = new Headers(cors);
+      headers.set("content-type", obj.httpMetadata?.contentType || "application/octet-stream");
+      headers.set("cache-control", "public, max-age=31536000");
+      return new Response(obj.body, { headers });
     }
     return json({ error: "not found" }, 404);
   },
