@@ -1,4 +1,3 @@
-use std::process::Command;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -6,6 +5,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Widget},
 };
+use std::fs;
+use std::process::Command;
 
 /// Live status of a roster member
 #[derive(Debug, Clone)]
@@ -71,6 +72,8 @@ pub struct RosterMember {
     pub name: String,
     pub adapter: String,
     pub wake: String,
+    pub harness: String,
+    pub model: String,
     pub health: Health,
     pub live_status: LiveStatus,
     pub issue: Option<String>,
@@ -86,7 +89,10 @@ impl RosterRail {
     /// Create a new roster rail by running `stitchpad doctor` and parsing the output
     pub fn from_doctor() -> Self {
         let members = Self::parse_doctor_output();
-        Self { members, selected: 0 }
+        Self {
+            members,
+            selected: 0,
+        }
     }
 
     /// Parse the output of `stitchpad doctor`
@@ -111,7 +117,11 @@ impl RosterRail {
             //   ✓ @dale (kitty/push) — healthy
             //   ⚠ @larry (kitty/push) — target '-' (no wake target, unreachable)
             //   ✗ @old-agent (kitty/push) — stale target — kitty window gone
-            if !trimmed.starts_with("✓") && !trimmed.starts_with("⚠") && !trimmed.starts_with("✗") && !trimmed.starts_with("?") {
+            if !trimmed.starts_with("✓")
+                && !trimmed.starts_with("⚠")
+                && !trimmed.starts_with("✗")
+                && !trimmed.starts_with("?")
+            {
                 continue;
             }
 
@@ -119,7 +129,7 @@ impl RosterRail {
             // Icons (✓⚠✗?) are 3/3/3/1 UTF-8 bytes; byte-slice panics on 3-byte codepoints.
             let rest = trimmed
                 .chars()
-                .skip(1)           // skip health icon
+                .skip(1) // skip health icon
                 .collect::<String>()
                 .trim()
                 .to_string();
@@ -127,8 +137,13 @@ impl RosterRail {
             // Extract @name
             let name = if let Some(at_pos) = rest.find('@') {
                 let after_at = &rest[at_pos + 1..];
-                after_at.split_whitespace().next()
-                    .and_then(|s| s.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-').next())
+                after_at
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| {
+                        s.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+                            .next()
+                    })
                     .unwrap_or("")
                     .to_string()
             } else {
@@ -136,11 +151,15 @@ impl RosterRail {
             };
 
             // Extract adapter/wake from (adapter/wake)
-            let adapter = rest.split('(').nth(1)
+            let adapter = rest
+                .split('(')
+                .nth(1)
                 .and_then(|s| s.split('/').next())
                 .unwrap_or("")
                 .to_string();
-            let wake = rest.split('/').nth(1)
+            let wake = rest
+                .split('/')
+                .nth(1)
                 .and_then(|s| s.split(')').next())
                 .unwrap_or("")
                 .to_string();
@@ -153,21 +172,36 @@ impl RosterRail {
             } else if rest.contains("stale target") || rest.contains("gone") {
                 (Health::StaleTarget, Some("window gone".to_string()))
             } else if rest.contains("no session identity") {
-                (Health::MissingIdentity, Some("no session identity".to_string()))
+                (
+                    Health::MissingIdentity,
+                    Some("no session identity".to_string()),
+                )
             } else {
                 (Health::Unknown, Some(rest.to_string()))
             };
 
             // Determine live status (DND flag, then kitty window liveness)
-            let live_status = if std::path::Path::new(&format!(".state/dnd/{}", name)).exists() {
-                LiveStatus::Dnd
-            } else if health == Health::Healthy {
-                LiveStatus::Online
-            } else {
-                LiveStatus::Offline
-            };
+            let live_status =
+                if std::path::Path::new(&format!(".stitchpad/.state/dnd.{}", name)).exists() {
+                    LiveStatus::Dnd
+                } else if health == Health::Healthy {
+                    LiveStatus::Online
+                } else {
+                    LiveStatus::Offline
+                };
 
-            members.push(RosterMember { name, adapter, wake, health, live_status, issue });
+            let (harness, model) = Self::member_metadata(&name, &adapter);
+
+            members.push(RosterMember {
+                name,
+                adapter,
+                wake,
+                harness,
+                model,
+                health,
+                live_status,
+                issue,
+            });
         }
 
         members
@@ -199,25 +233,50 @@ impl RosterRail {
     pub fn selected(&self) -> Option<&RosterMember> {
         self.members.get(self.selected)
     }
+
+    fn member_metadata(name: &str, adapter: &str) -> (String, String) {
+        let harness = Self::state_value("runtime", name)
+            .or_else(|| Self::state_value("harness", name))
+            .unwrap_or_else(|| {
+                if adapter.trim().is_empty() {
+                    "—".to_string()
+                } else {
+                    adapter.to_string()
+                }
+            });
+        let model = Self::state_value("model", name).unwrap_or_else(|| "—".to_string());
+        (harness, model)
+    }
+
+    fn state_value(prefix: &str, name: &str) -> Option<String> {
+        let path = format!(".stitchpad/.state/{}.{}", prefix, name);
+        fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
 }
 
 impl Widget for &RosterRail {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let block = Block::default()
-            .title(" Roster ")
-            .borders(Borders::ALL);
+        let block = Block::default().title(" Roster ").borders(Borders::ALL);
 
         let inner = block.inner(area);
         block.render(area, buf);
 
         if self.members.is_empty() {
-            let empty = Line::from(Span::styled("  No members", Style::default().fg(Color::Gray)));
+            let empty = Line::from(Span::styled(
+                "  No members",
+                Style::default().fg(Color::Gray),
+            ));
             buf.set_line(inner.x, inner.y, &empty, inner.width);
             return;
         }
 
+        let compact = inner.height < (self.members.len() as u16).saturating_mul(2);
+
         for (i, member) in self.members.iter().enumerate() {
-            let y = inner.y + i as u16;
+            let y = inner.y + if compact { i as u16 } else { (i as u16) * 2 };
             if y >= inner.y + inner.height {
                 break;
             }
@@ -241,6 +300,21 @@ impl Widget for &RosterRail {
             ]);
 
             buf.set_line(inner.x, y, &line, inner.width);
+
+            if !compact && y + 1 < inner.y + inner.height {
+                let meta = Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled("harness ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("{} ", member.harness),
+                        Style::default().fg(Color::Gray),
+                    ),
+                    Span::styled("· ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("model ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(&member.model, Style::default().fg(Color::Gray)),
+                ]);
+                buf.set_line(inner.x, y + 1, &meta, inner.width);
+            }
         }
     }
 }

@@ -67,6 +67,10 @@ export default function stitchpadExtension(pi: ExtensionAPI) {
         await exec(k, ["@", "--to", sock, "set-tab-title", "--match", `id:${win}`, `🧵 ${params.name}`]).catch(() => {});
       }
       await sp(["join", params.name, "kitty", "push", target], ctx.cwd).catch(() => {});
+      await sp(["meta", "set", params.name, "runtime", "pi"], ctx.cwd).catch(() => {});
+      if (process.env.STITCHPAD_MODEL) {
+        await sp(["meta", "set", params.name, "model", process.env.STITCHPAD_MODEL], ctx.cwd).catch(() => {});
+      }
       // Use KITTY_WINDOW_ID as session key (not shared "-") so multiple pi
       // agents on the same pad each get their own identity in sessions/<winid>.
       // Falls back to shared whoami only when no kitty window is available.

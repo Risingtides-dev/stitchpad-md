@@ -66,14 +66,22 @@ fn match_marker(chars: &[char], i: usize) -> Option<(usize, String, Style)> {
     if chars[i..].starts_with(&['*', '*']) {
         if let Some(end) = find_close(chars, i + 2, &['*', '*']) {
             let inner: String = chars[i + 2..end].iter().collect();
-            return Some((end + 2 - i, inner, Style::default().add_modifier(Modifier::BOLD)));
+            return Some((
+                end + 2 - i,
+                inner,
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
         }
     }
     // *italic*  (single star; ensure it's not the start of **)
     if chars[i] == '*' && chars.get(i + 1) != Some(&'*') {
         if let Some(end) = find_close(chars, i + 1, &['*']) {
             let inner: String = chars[i + 1..end].iter().collect();
-            return Some((end + 1 - i, inner, Style::default().add_modifier(Modifier::ITALIC)));
+            return Some((
+                end + 1 - i,
+                inner,
+                Style::default().add_modifier(Modifier::ITALIC),
+            ));
         }
     }
     // `code`

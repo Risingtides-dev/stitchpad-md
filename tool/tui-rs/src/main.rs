@@ -1,20 +1,20 @@
 mod color;
 mod widgets;
 
-use std::io;
-use std::sync::mpsc;
-use std::path::Path;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     execute,
-};
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    Terminal,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use notify::{RecursiveMode, Watcher};
+use ratatui::{
+    Terminal,
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+};
+use std::io;
+use std::path::Path;
+use std::sync::mpsc;
 
 fn main() -> io::Result<()> {
     // Setup terminal
@@ -51,7 +51,10 @@ fn main() -> io::Result<()> {
             Ok(w)
         })
         .ok()
-        .map(|w| { let _ = &pad; w }) // keep watcher alive for the program's lifetime
+        .map(|w| {
+            let _ = &pad;
+            w
+        }) // keep watcher alive for the program's lifetime
     };
 
     loop {
@@ -67,43 +70,63 @@ fn main() -> io::Result<()> {
 
         // Draw UI
         terminal.draw(|f| {
+            use ratatui::style::{Color, Style};
+            use ratatui::widgets::{Block, Borders, Paragraph};
+
+            // top = main area, bottom = thin hint footer
             let main_chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(3),
-                    Constraint::Length(if composing { 3 } else { 1 }),
-                ])
+                .constraints([Constraint::Min(3), Constraint::Length(1)])
                 .split(f.area());
 
+            // left = messages, right = roster column (rail + compose box stacked)
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Percentage(70),
-                    Constraint::Percentage(30),
-                ])
+                .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
                 .split(main_chunks[0]);
+
+            // right column: roster on top, PROMPT box pinned to the bottom.
+            let right = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(10), Constraint::Length(8)])
+                .split(chunks[1]);
 
             // Message list (live-tail, scrollable)
             f.render_widget(&messages, chunks[0]);
-
             // Roster rail
-            f.render_widget(&roster, chunks[1]);
+            f.render_widget(&roster, right[0]);
 
-            // Footer / compose bar
-            if composing {
-                let prompt = format!("Compose (Esc=cancel, Enter=send): {}", compose_buf);
-                let bar = ratatui::widgets::Paragraph::new(prompt)
-                    .block(ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::TOP));
-                f.render_widget(bar, main_chunks[1]);
+            // Prompt box — under the roster. Type @names to address agents, Enter sends.
+            let (title, body, border) = if composing {
+                (
+                    " Prompt  Enter=send  Esc=cancel ",
+                    format!("{}\n_", compose_buf),
+                    Color::Cyan,
+                )
             } else {
-                let footer = format!(
-                    "q:quit  a:compose  Tab:focus[{}]  j/k:nav  r:refresh",
-                    focus_labels[focus as usize]
-                );
-                let bar = ratatui::widgets::Paragraph::new(footer)
-                    .block(ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::TOP));
-                f.render_widget(bar, main_chunks[1]);
-            }
+                (
+                    " Prompt ",
+                    "Press a to compose\nStart with @name to wake agents\n\n".to_string(),
+                    Color::DarkGray,
+                )
+            };
+            let compose = Paragraph::new(body)
+                .style(Style::default().fg(if composing { Color::White } else { Color::Gray }))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(title)
+                        .border_style(Style::default().fg(border)),
+                )
+                .wrap(ratatui::widgets::Wrap { trim: false });
+            f.render_widget(compose, right[1]);
+
+            // thin bottom hint
+            let footer = Paragraph::new(format!(
+                "q:quit  a:compose  Tab:focus[{}]  j/k:nav  r:refresh",
+                focus_labels[focus as usize]
+            ));
+            f.render_widget(footer, main_chunks[1]);
         })?;
 
         // Handle input
@@ -112,7 +135,10 @@ fn main() -> io::Result<()> {
                 if key.kind == KeyEventKind::Press {
                     if composing {
                         match key.code {
-                            KeyCode::Esc => { composing = false; compose_buf.clear(); }
+                            KeyCode::Esc => {
+                                composing = false;
+                                compose_buf.clear();
+                            }
                             KeyCode::Enter => {
                                 if !compose_buf.trim().is_empty() {
                                     // Shell out to stitchpad say; STITCHPAD_NAME comes from env
@@ -125,23 +151,55 @@ fn main() -> io::Result<()> {
                                     messages.refresh();
                                 }
                             }
-                            KeyCode::Backspace => { compose_buf.pop(); }
+                            KeyCode::Backspace => {
+                                compose_buf.pop();
+                            }
                             KeyCode::Char(c) => compose_buf.push(c),
                             _ => {}
                         }
                     } else {
                         match key.code {
                             KeyCode::Char('q') => break,
-                            KeyCode::Char('a') => { composing = true; compose_buf.clear(); }
+                            KeyCode::Char('a') => {
+                                composing = true;
+                                compose_buf.clear();
+                            }
                             KeyCode::Tab => focus = (focus + 1) % focus_labels.len() as u8,
-                            KeyCode::BackTab => focus = (focus + focus_labels.len() as u8 - 1) % focus_labels.len() as u8,
-                            KeyCode::Char('j') => if focus == 0 { roster.next() } else { messages.scroll_down() },
-                            KeyCode::Char('k') => if focus == 0 { roster.previous() } else { messages.scroll_up() },
+                            KeyCode::BackTab => {
+                                focus = (focus + focus_labels.len() as u8 - 1)
+                                    % focus_labels.len() as u8
+                            }
+                            KeyCode::Char('j') => {
+                                if focus == 0 {
+                                    roster.next()
+                                } else {
+                                    messages.scroll_down()
+                                }
+                            }
+                            KeyCode::Char('k') => {
+                                if focus == 0 {
+                                    roster.previous()
+                                } else {
+                                    messages.scroll_up()
+                                }
+                            }
                             KeyCode::Up => messages.scroll_up(),
                             KeyCode::Down => messages.scroll_down(),
-                            KeyCode::PageUp => for _ in 0..10 { messages.scroll_up() },
-                            KeyCode::PageDown => for _ in 0..10 { messages.scroll_down() },
-                            KeyCode::Char('r') => { color::invalidate(); roster.refresh(); messages.refresh(); }
+                            KeyCode::PageUp => {
+                                for _ in 0..10 {
+                                    messages.scroll_up()
+                                }
+                            }
+                            KeyCode::PageDown => {
+                                for _ in 0..10 {
+                                    messages.scroll_down()
+                                }
+                            }
+                            KeyCode::Char('r') => {
+                                color::invalidate();
+                                roster.refresh();
+                                messages.refresh();
+                            }
                             _ => {}
                         }
                     }

@@ -8,10 +8,10 @@
 //! Resolved colors are cached (one subprocess per author, not per frame). Unknown
 //! or unreachable → neutral grey, so rendering never panics.
 
+use ratatui::style::Color;
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Mutex;
-use ratatui::style::Color;
 
 static CACHE: Mutex<Option<HashMap<String, Color>>> = Mutex::new(None);
 
@@ -39,7 +39,10 @@ pub fn invalidate() {
 }
 
 fn resolve(name: &str) -> Option<Color> {
-    let out = Command::new("stitchpad").args(["color", name]).output().ok()?;
+    let out = Command::new("stitchpad")
+        .args(["color", name])
+        .output()
+        .ok()?;
     let text = String::from_utf8(out.stdout).ok()?;
     // CLI prints "#rrggbb" (optionally a fg token too); take the first hex color.
     text.split_whitespace().find_map(parse_hex)
@@ -64,9 +67,9 @@ mod tests {
     #[test]
     fn parses_hex_forms() {
         assert_eq!(parse_hex("#ff1493"), Some(Color::Rgb(255, 20, 147))); // Jill override
-        assert_eq!(parse_hex("5f2f8f"), Some(Color::Rgb(95, 47, 143)));   // ernie, no '#'
+        assert_eq!(parse_hex("5f2f8f"), Some(Color::Rgb(95, 47, 143))); // ernie, no '#'
         assert_eq!(parse_hex("#ABCDEF"), Some(Color::Rgb(171, 205, 239))); // case-insensitive
-        assert_eq!(parse_hex("#fff"), None);   // too short
+        assert_eq!(parse_hex("#fff"), None); // too short
         assert_eq!(parse_hex("nothex"), None); // non-hex
     }
 

@@ -1,4 +1,3 @@
-use std::process::Command;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -6,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Widget},
 };
+use std::process::Command;
 
 /// One parsed pad message: a `## @author · time` header block + its body lines.
 #[derive(Debug, Clone)]
@@ -35,7 +35,11 @@ pub struct MessageList {
 impl MessageList {
     pub fn from_pad() -> Self {
         let messages = Self::parse_pad();
-        Self { messages, scroll: 0, follow: true }
+        Self {
+            messages,
+            scroll: 0,
+            follow: true,
+        }
     }
 
     /// Re-read the pad. Called on a file-change event (live-tail) or manual refresh.
@@ -72,7 +76,13 @@ impl MessageList {
                     Some((a, t)) => (a.trim().to_string(), t.trim().to_string()),
                     None => (rest.trim().to_string(), String::new()),
                 };
-                cur = Some(Message { author, time, body: Vec::new(), ordinal: 0, seen_by: Vec::new() });
+                cur = Some(Message {
+                    author,
+                    time,
+                    body: Vec::new(),
+                    ordinal: 0,
+                    seen_by: Vec::new(),
+                });
             } else if let Some(msg) = cur.as_mut() {
                 // trim trailing blank lines lazily: skip leading blanks, keep inner
                 if !(msg.body.is_empty() && line.trim().is_empty()) {
@@ -164,15 +174,23 @@ impl MessageList {
     /// ending `scroll` lines above the newest. Returns the flat line list so the
     /// Widget impl just slices it — keeps wrap + scroll logic in one place.
     fn rendered_lines(&self, width: u16) -> Vec<Line<'static>> {
+        const GUTTER: &str = "▎";
+        const GAP: &str = " ";
         const INDENT: &str = "  "; // body sits 2 cols under its author — Slack-style grouping
+        const BODY_PREFIX_WIDTH: usize = 4; // gutter + gap + 2-space body indent
         let mut lines: Vec<Line> = Vec::new();
         for m in &self.messages {
             let color = Self::author_color(&m.author);
-            // header: "@author · time" — author in its color, dim middot + time as quiet meta.
-            let mut header = vec![Span::styled(
-                format!("@{}", m.author),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            )];
+            // header: colored gutter + "@author · time". Keep the name as the strong
+            // speaker cue; the gutter carries the color through the whole block.
+            let mut header = vec![
+                Span::styled(GUTTER, Style::default().fg(color)),
+                Span::raw(GAP),
+                Span::styled(
+                    format!("@{}", m.author),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+            ];
             if !m.time.is_empty() {
                 header.push(Span::styled(
                     format!("  ·  {}", m.time),
@@ -184,22 +202,35 @@ impl MessageList {
             // body: inline-markdown → styled spans, word-wrapped, hanging-indented.
             // an `!img: <path>` line renders as a muted placeholder (kitty icat is a
             // later enhancement; the placeholder keeps it legible everywhere now).
-            let avail = (width as usize).saturating_sub(INDENT.len()).max(8);
+            let avail = (width as usize).saturating_sub(BODY_PREFIX_WIDTH).max(8);
             for raw in &m.body {
                 if raw.trim().is_empty() {
-                    lines.push(Line::from(""));
+                    lines.push(Line::from(vec![
+                        Span::styled(GUTTER, Style::default().fg(color)),
+                        Span::raw(GAP),
+                        Span::raw(INDENT),
+                    ]));
                     continue;
                 }
                 if let Some(path) = super::markdown::image_path(raw) {
-                    lines.push(Line::from(Span::styled(
-                        format!("{}[image: {}]", INDENT, path),
-                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-                    )));
+                    lines.push(Line::from(vec![
+                        Span::styled(GUTTER, Style::default().fg(color)),
+                        Span::raw(GAP),
+                        Span::raw(INDENT),
+                        Span::styled(
+                            format!("[image: {}]", path),
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .add_modifier(Modifier::ITALIC),
+                        ),
+                    ]));
                     continue;
                 }
                 let spans = super::markdown::parse_line(raw);
                 for mut row in wrap_spans(spans, avail) {
                     row.insert(0, Span::raw(INDENT));
+                    row.insert(0, Span::raw(GAP));
+                    row.insert(0, Span::styled(GUTTER, Style::default().fg(color)));
                     lines.push(Line::from(row));
                 }
             }
@@ -211,12 +242,17 @@ impl MessageList {
                     .map(|n| format!("@{}", n))
                     .collect::<Vec<_>>()
                     .join(" ");
-                lines.push(Line::from(Span::styled(
-                    format!("{}seen by {}", INDENT, who),
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                )));
+                lines.push(Line::from(vec![
+                    Span::styled(GUTTER, Style::default().fg(color)),
+                    Span::raw(GAP),
+                    Span::raw(INDENT),
+                    Span::styled(
+                        format!("seen by {}", who),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                ]));
             }
             lines.push(Line::from("")); // one-line breath between messages
         }
@@ -347,7 +383,11 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
             }
             continue;
         }
-        let need = if line.is_empty() { wlen } else { len + 1 + wlen };
+        let need = if line.is_empty() {
+            wlen
+        } else {
+            len + 1 + wlen
+        };
         if need > width {
             out.push(std::mem::take(&mut line));
             line.push_str(word);
@@ -370,16 +410,31 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Style;
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
 
     #[test]
     fn wrap_keeps_words_and_breaks_long_tokens() {
         // normal prose wraps on word boundaries
         let w = wrap_words("the quick brown fox jumps", 10);
-        assert!(w.iter().all(|l| l.chars().count() <= 10), "no line exceeds width");
-        assert_eq!(w.join(" "), "the quick brown fox jumps", "words preserved in order");
+        assert!(
+            w.iter().all(|l| l.chars().count() <= 10),
+            "no line exceeds width"
+        );
+        assert_eq!(
+            w.join(" "),
+            "the quick brown fox jumps",
+            "words preserved in order"
+        );
         // an over-long token is hard-broken, never overflows
         let long = wrap_words("https://example.com/really/long/path", 10);
-        assert!(long.iter().all(|l| l.chars().count() <= 10), "long token hard-broken to width");
+        assert!(
+            long.iter().all(|l| l.chars().count() <= 10),
+            "long token hard-broken to width"
+        );
     }
 
     // (author colors now come from the shared `stitchpad color` CLI as Color::Rgb —
@@ -389,10 +444,39 @@ mod tests {
     #[test]
     fn parse_splits_header_and_body() {
         // ensure the header/body split contract holds (drives the whole render)
-        let m = Message { author: "dale".into(), time: "09:30 PM".into(), body: vec!["hi".into()], ordinal: 5, seen_by: vec!["mark".into()] };
+        let m = Message {
+            author: "dale".into(),
+            time: "09:30 PM".into(),
+            body: vec!["hi".into()],
+            ordinal: 5,
+            seen_by: vec!["mark".into()],
+        };
         assert_eq!(m.author, "dale");
         assert_eq!(m.time, "09:30 PM");
         assert_eq!(m.ordinal, 5);
         assert_eq!(m.seen_by, vec!["mark".to_string()]);
+    }
+
+    #[test]
+    fn rendered_lines_use_colored_gutter_but_keep_plain_body_text() {
+        let list = MessageList {
+            messages: vec![Message {
+                author: "dale".into(),
+                time: "09:30 PM".into(),
+                body: vec!["hello".into()],
+                ordinal: 5,
+                seen_by: vec!["mark".into()],
+            }],
+            scroll: 0,
+            follow: true,
+        };
+
+        let lines = list.rendered_lines(40);
+        assert_eq!(line_text(&lines[0]), "▎ @dale  ·  09:30 PM");
+        assert_eq!(line_text(&lines[1]), "▎   hello");
+        assert_eq!(line_text(&lines[2]), "▎   seen by @mark");
+        assert_eq!(line_text(&lines[3]), "");
+
+        assert_eq!(lines[1].spans[3].style, Style::default());
     }
 }

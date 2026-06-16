@@ -167,8 +167,19 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           await execFileP("kitty", ["@", "--to", sock, "set-window-title", "--match", `id:${win}`, `🧵 ${a.name}`]).catch(() => {});
           await execFileP("kitty", ["@", "--to", sock, "set-tab-title", "--match", `id:${win}`, `🧵 ${a.name}`]).catch(() => {});
         }
-        // adapter column = "kitty" (the universal wake); runtime kept in the note.
+        // adapter column = "kitty" (the universal wake); runtime metadata records
+        // the actual harness (claude/codex/pi) for TUI roster classifiers.
         out = await sp(["join", a.name, "kitty", "push", target]);
+        await sp(["meta", "set", a.name, "runtime", adapter]).catch(() => {});
+        const model =
+          process.env.STITCHPAD_MODEL ||
+          process.env.CODEX_MODEL ||
+          process.env.CLAUDE_MODEL ||
+          process.env.ANTHROPIC_MODEL ||
+          "";
+        if (model) {
+          await sp(["meta", "set", a.name, "model", model]).catch(() => {});
+        }
         await bindSession(a.name);   // hold identity + write session record for the hook
         out += target === "-"
           ? `\n(you are @${a.name}, but no kitty window detected — external wake won't work unless you run in kitty. Hook-based turn-end wake still applies.)`
