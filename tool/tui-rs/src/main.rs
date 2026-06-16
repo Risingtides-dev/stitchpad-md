@@ -141,7 +141,7 @@ fn main() -> io::Result<()> {
                             KeyCode::Down => messages.scroll_down(),
                             KeyCode::PageUp => for _ in 0..10 { messages.scroll_up() },
                             KeyCode::PageDown => for _ in 0..10 { messages.scroll_down() },
-                            KeyCode::Char('r') => { roster.refresh(); messages.refresh(); }
+                            KeyCode::Char('r') => { color::invalidate(); roster.refresh(); messages.refresh(); }
                             _ => {}
                         }
                     }
