@@ -48,13 +48,49 @@ while :; do
       # Try to read persona from tool/personas/<name>.md
       _persona_file="$proj/tool/personas/$(echo "$_name" | tr '[:upper:]' '[:lower:]').md"
       if [ -f "$_persona_file" ]; then
-        _role="$(head -1 "$_persona_file" | sed 's/^# //')"
-        _persona="$(cat "$_persona_file" | head -5 | tail -4)"
+        _role="$(grep -m1 '^ROLE:' "$_persona_file" | sed 's/^ROLE:[[:space:]]*//')"
+        [ -z "$_role" ] && _role="$(head -1 "$_persona_file" | sed 's/^# //')"
+        _persona="$(grep -m1 '^PERSONA:' "$_persona_file" | sed 's/^PERSONA:[[:space:]]*//')"
+        _skills="$(python3 -c "
+import json
+with open('$_persona_file') as f:
+    lines = f.readlines()
+in_skills = False
+skills = []
+for line in lines:
+    line = line.strip()
+    if line.startswith('SKILLS:'):
+        in_skills = True
+        continue
+    if in_skills and line.startswith('- '):
+        parts = line[2:].split(' — ', 1)
+        name = parts[0].strip()
+        desc = parts[1].strip() if len(parts) > 1 else ''
+        skills.append({'name': name, 'desc': desc})
+    elif in_skills and not line.startswith('- ') and line:
+        break
+print(json.dumps(skills))
+" 2>/dev/null || echo '[]')"
+        [ -z "$_skills" ] && _skills='[]'
       fi
       # Get adapter from roster entry
       _adapter="$(echo "$roster" | jq -r '.[] | select(.name=="'"$_name"'") | .adapter // ""' 2>/dev/null || echo '')"
-      profiles="$(echo "$profiles" | jq --arg n "$_name" --arg m "$_model" --arg r "$_role" --arg p "$_persona" --argjson s "${_skills:-[]}" --arg h "$_adapter" \
-        '. + {($n): {role:$r, persona:$p, skills:$s, model:$m, harness:$h}}')"
+      # Derive status: dnd > working > available > idle
+      _status="available"
+      if [ -f "$padd/.state/dnd.$_name" ]; then
+        _status="dnd"
+      else
+        # Check if agent posted within last 90s (working)
+        _last_post_epoch="$(grep -a "^## @$_name" "$padd/stitchpad.md" | tail -1 | grep -o '[0-9]\{2\}:[0-9]\{2\}' | tail -1 | xargs -I{} date -j -f '%H:%M' '{}' +%s 2>/dev/null || echo 0)"
+        _now_hour="$(date +%H:%M)"
+        _now_epoch="$(date -j -f '%H:%M' "$_now_hour" +%s 2>/dev/null || echo 0)"
+        _post_age=$(( _now_epoch - _last_post_epoch ))
+        if [ "$_post_age" -gt 0 ] && [ "$_post_age" -lt 90 ]; then
+          _status="working"
+        fi
+      fi
+      profiles="$(echo "$profiles" | jq --arg n "$_name" --arg m "$_model" --arg r "$_role" --arg p "$_persona" --argjson s "${_skills:-[]}" --arg h "$_adapter" --arg st "$_status" \
+        '. + {($n): {role:$r, persona:$p, skills:$s, model:$m, harness:$h, status:$st}}')"
     done
     # push this pad up (markdown + roster + files + colors + profiles)
     jq -nc --arg pad "$md" --argjson roster "[${roster}]" --argjson files "${files:-[]}" --argjson colors "${colors}" --argjson profiles "${profiles}" \
