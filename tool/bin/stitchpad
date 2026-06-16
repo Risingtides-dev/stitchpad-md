@@ -83,6 +83,17 @@ EOF
     sp_commit "roster: + $who ($adapter/$wake)"
     sp_unlock
     echo "✓ $who joined (adapter=$adapter wake=$wake)"
+    # PERSONA INJECTION: if a join-pack exists for this name, print it so the
+    # joining agent assumes its role (persona + skill glossary, skills lazy-loaded
+    # on demand). The agent reads this as its operating identity. Glossary only —
+    # skills are pulled with /skill:<name> when a task needs one.
+    _pack="$STITCHPAD_HOME/personas/$who.md"
+    if [ -f "$_pack" ]; then
+      echo
+      echo "── your stitchpad role (assume this persona) ──"
+      cat "$_pack"
+      echo "── skills above are a GLOSSARY: load one with /skill:<name> only when a task needs it ──"
+    fi
     ;;
 
   clear)
