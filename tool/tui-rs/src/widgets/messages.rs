@@ -13,6 +13,11 @@ pub struct Message {
     pub author: String,
     pub time: String,
     pub body: Vec<String>,
+    /// Absolute `## @` block ordinal from the start of the pad (1-based). This is the
+    /// same unit `.state/seen.<name>` stores, so read-receipts compare against it.
+    pub ordinal: usize,
+    /// Names whose seen-cursor has reached this message (read-receipt: "seen by").
+    pub seen_by: Vec<String>,
 }
 
 /// Scrollable, Slack-style message list. Mirrors RosterRail: owns its own data,
@@ -43,7 +48,8 @@ impl MessageList {
 
     /// Parse `stitchpad read -n N` output into messages. A block is a `## @name · time`
     /// header followed by body lines up to the next `## ` header. Roster/separator
-    /// noise (lines before the first header) is ignored.
+    /// noise (lines before the first header) is ignored. Absolute block ordinals and
+    /// read-receipts (`seen_by`) are attached after parsing.
     fn parse_pad() -> Vec<Message> {
         // -n large enough to fill any terminal; the CLI is the source of truth.
         let output = Command::new("stitchpad")
@@ -66,7 +72,7 @@ impl MessageList {
                     Some((a, t)) => (a.trim().to_string(), t.trim().to_string()),
                     None => (rest.trim().to_string(), String::new()),
                 };
-                cur = Some(Message { author, time, body: Vec::new() });
+                cur = Some(Message { author, time, body: Vec::new(), ordinal: 0, seen_by: Vec::new() });
             } else if let Some(msg) = cur.as_mut() {
                 // trim trailing blank lines lazily: skip leading blanks, keep inner
                 if !(msg.body.is_empty() && line.trim().is_empty()) {
@@ -77,18 +83,74 @@ impl MessageList {
         if let Some(prev) = cur.take() {
             messages.push(prev);
         }
+
+        // Absolute ordinals: `read -n` gives a tail, so number backwards from the pad's
+        // total `## @` block count — that's the unit seen.<name> uses.
+        let total = Self::total_blocks();
+        let n = messages.len();
+        for (i, m) in messages.iter_mut().enumerate() {
+            // last parsed message is block `total`; earlier ones count down.
+            m.ordinal = total.saturating_sub(n - 1 - i);
+        }
+
+        // Read-receipts: a member has "seen" block N if seen.<member> >= N. Exclude the
+        // author (you don't receipt your own post) and any cursor of 0/missing.
+        let cursors = Self::seen_cursors();
+        for m in messages.iter_mut() {
+            let mut seers: Vec<String> = cursors
+                .iter()
+                .filter(|(name, ord)| **ord >= m.ordinal && name.as_str() != m.author)
+                .map(|(name, _)| name.clone())
+                .collect();
+            seers.sort();
+            m.seen_by = seers;
+        }
+
         messages
     }
 
-    /// Stable per-author color, matching the bash TUI's name-hash → 256-color so the
-    /// two clients agree on who's what color. (djb2-ish hash, mapped into the
-    /// 16..231 ANSI cube to skip dim/near-bg shades.)
-    fn author_color(name: &str) -> Color {
-        let mut h: u32 = 5381;
-        for b in name.bytes() {
-            h = h.wrapping_mul(33).wrapping_add(b as u32);
+    /// Total `## @` block count in the full pad — the absolute ordinal of the newest
+    /// message. Cheap: count headers via the CLI's read of the whole file.
+    fn total_blocks() -> usize {
+        Command::new("stitchpad")
+            .args(["read", "-n", "100000"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.lines().filter(|l| l.starts_with("## @")).count())
+            .unwrap_or(0)
+    }
+
+    /// Read `.state/seen.<name>` cursors → {name: highest-delivered-ordinal}. Missing
+    /// dir or unreadable files just yield no receipts (graceful: no "seen by" shown).
+    fn seen_cursors() -> std::collections::HashMap<String, usize> {
+        let mut map = std::collections::HashMap::new();
+        let dir = std::path::Path::new(".stitchpad/.state");
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let fname = e.file_name();
+                let fname = fname.to_string_lossy();
+                if let Some(name) = fname.strip_prefix("seen.") {
+                    if let Ok(s) = std::fs::read_to_string(e.path()) {
+                        if let Ok(ord) = s.trim().parse::<usize>() {
+                            map.insert(name.to_string(), ord);
+                        }
+                    }
+                }
+            }
         }
-        Color::Indexed(16 + (h % 216) as u8)
+        map
+    }
+
+    /// Canonical per-author 256-color. MUST match the bash `color_for()` (the single
+    /// source of truth shared by the TUI and the kitty window-bg adapter): sum of the
+    /// name's char codes, modulo the curated PALETTE. Same name → same color in the
+    /// pad, the message list, AND the kitty window background. No second scheme.
+    fn author_color(name: &str) -> Color {
+        // keep in lockstep with PALETTE in lib.sh / tui.sh.
+        const PALETTE: [u8; 12] = [39, 208, 76, 170, 214, 51, 199, 220, 123, 141, 203, 80];
+        let sum: u32 = name.chars().map(|c| c as u32).sum();
+        Color::Indexed(PALETTE[(sum as usize) % PALETTE.len()])
     }
 
     pub fn scroll_up(&mut self) {
@@ -134,6 +196,21 @@ impl MessageList {
                 for wrapped in wrap_words(raw, avail) {
                     lines.push(Line::from(Span::raw(format!("{}{}", INDENT, wrapped))));
                 }
+            }
+            // read-receipt: quiet "seen by @x @y" under the message, only if anyone has.
+            if !m.seen_by.is_empty() {
+                let who = m
+                    .seen_by
+                    .iter()
+                    .map(|n| format!("@{}", n))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                lines.push(Line::from(Span::styled(
+                    format!("{}seen by {}", INDENT, who),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                )));
             }
             lines.push(Line::from("")); // one-line breath between messages
         }
@@ -232,10 +309,27 @@ mod tests {
     }
 
     #[test]
+    fn author_color_matches_bash_color_for() {
+        // Pinned to the canonical bash color_for() values so the pad TUI, message list,
+        // and kitty window background never drift. If PALETTE/algorithm changes, this
+        // breaks loudly. john's cited mapping: dale=203, mark=220, larry=76.
+        let idx = |n: &str| match MessageList::author_color(n) {
+            Color::Indexed(i) => i,
+            _ => panic!("expected indexed color"),
+        };
+        assert_eq!(idx("dale"), 203);
+        assert_eq!(idx("mark"), 220);
+        assert_eq!(idx("larry"), 76);
+        assert_eq!(idx("ernie"), 170);
+    }
+
+    #[test]
     fn parse_splits_header_and_body() {
         // ensure the header/body split contract holds (drives the whole render)
-        let m = Message { author: "dale".into(), time: "09:30 PM".into(), body: vec!["hi".into()] };
+        let m = Message { author: "dale".into(), time: "09:30 PM".into(), body: vec!["hi".into()], ordinal: 5, seen_by: vec!["mark".into()] };
         assert_eq!(m.author, "dale");
         assert_eq!(m.time, "09:30 PM");
+        assert_eq!(m.ordinal, 5);
+        assert_eq!(m.seen_by, vec!["mark".to_string()]);
     }
 }
