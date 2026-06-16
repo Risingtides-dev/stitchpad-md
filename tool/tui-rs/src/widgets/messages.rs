@@ -142,15 +142,10 @@ impl MessageList {
         map
     }
 
-    /// Canonical per-author 256-color. MUST match the bash `color_for()` (the single
-    /// source of truth shared by the TUI and the kitty window-bg adapter): sum of the
-    /// name's char codes, modulo the curated PALETTE. Same name → same color in the
-    /// pad, the message list, AND the kitty window background. No second scheme.
+    /// Get author color from the shared color module — `Color::Rgb` straight from
+    /// `stitchpad color <name>`, so the board matches the terminal/window exactly.
     fn author_color(name: &str) -> Color {
-        // keep in lockstep with PALETTE in lib.sh / tui.sh.
-        const PALETTE: [u8; 12] = [39, 208, 76, 170, 214, 51, 199, 220, 123, 141, 203, 80];
-        let sum: u32 = name.chars().map(|c| c as u32).sum();
-        Color::Indexed(PALETTE[(sum as usize) % PALETTE.len()])
+        crate::color::color_for(name)
     }
 
     pub fn scroll_up(&mut self) {
@@ -387,20 +382,9 @@ mod tests {
         assert!(long.iter().all(|l| l.chars().count() <= 10), "long token hard-broken to width");
     }
 
-    #[test]
-    fn author_color_matches_bash_color_for() {
-        // Pinned to the canonical bash color_for() values so the pad TUI, message list,
-        // and kitty window background never drift. If PALETTE/algorithm changes, this
-        // breaks loudly. john's cited mapping: dale=203, mark=220, larry=76.
-        let idx = |n: &str| match MessageList::author_color(n) {
-            Color::Indexed(i) => i,
-            _ => panic!("expected indexed color"),
-        };
-        assert_eq!(idx("dale"), 203);
-        assert_eq!(idx("mark"), 220);
-        assert_eq!(idx("larry"), 76);
-        assert_eq!(idx("ernie"), 170);
-    }
+    // (author colors now come from the shared `stitchpad color` CLI as Color::Rgb —
+    // see color.rs tests for hex parsing + the live terminal-match assertion. No
+    // indexed-palette test here anymore; the CLI is the single source.)
 
     #[test]
     fn parse_splits_header_and_body() {

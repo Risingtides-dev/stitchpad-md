@@ -222,10 +222,13 @@ impl Widget for &RosterRail {
                 break;
             }
 
-            let style = if i == self.selected {
-                Style::default().fg(member.health.color()).add_modifier(Modifier::BOLD)
+            // Name uses the shared author color (matches the pad + the kitty window);
+            // status/health dots keep their status colors. Selected row = bold name.
+            let name_color = crate::color::color_for(&member.name);
+            let name_style = if i == self.selected {
+                Style::default().fg(name_color).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(member.health.color())
+                Style::default().fg(name_color)
             };
 
             let icon_style = Style::default().fg(member.health.color());
@@ -234,7 +237,7 @@ impl Widget for &RosterRail {
             let line = Line::from(vec![
                 Span::styled(format!(" {} ", member.live_status.icon()), live_style),
                 Span::styled(format!("{} ", member.health.icon()), icon_style),
-                Span::styled(format!("@{}", member.name), style),
+                Span::styled(format!("@{}", member.name), name_style),
             ]);
 
             buf.set_line(inner.x, y, &line, inner.width);

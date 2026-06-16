@@ -1,79 +1,60 @@
+//! Single source of truth for author colors: the bash CLI `stitchpad color <name>`.
+//!
+//! The CLI emits the final RGB hex (`#rrggbb`) with the override map applied
+//! (e.g. Jill=#ff1493, ernie=#5f2f8f) and the same collision-aware assignment the
+//! kitty window backgrounds use. The TUI does NOT reimplement any palette — it
+//! shells out and parses the hex, so the board and the terminals can never drift.
+//!
+//! Resolved colors are cached (one subprocess per author, not per frame). Unknown
+//! or unreachable → neutral grey, so rendering never panics.
+
+use std::collections::HashMap;
+use std::process::Command;
+use std::sync::Mutex;
 use ratatui::style::Color;
 
-/// Curated 20-color palette of visually distinct hues (256-color indices).
-/// Wide enough to avoid collisions for typical rosters (up to 20 agents).
-const PALETTE: [u8; 20] = [
-    39,   // blue
-    208,  // orange
-    76,   // green
-    170,  // pink
-    214,  // yellow-orange
-    51,   // cyan
-    199,  // magenta
-    220,  // gold
-    123,  // light cyan
-    141,  // lavender
-    203,  // salmon
-    82,   // lime
-    205,  // hot pink
-    114,  // light green
-    177,  // orchid
-    226,  // bright yellow
-    87,   // sky blue
-    213,  // pink-purple
-    155,  // pale green
-    159,  // ice blue
-];
+static CACHE: Mutex<Option<HashMap<String, Color>>> = Mutex::new(None);
 
-/// Hash a name to a palette index (deterministic, position-independent).
-fn hash_name(name: &str) -> usize {
-    let sum: u32 = name.chars().map(|c| c as u32).sum();
-    (sum as usize) % PALETTE.len()
-}
-
-/// Assign collision-aware colors to a list of names.
-/// Walks names in order; each name gets its hashed slot, but if already taken,
-/// advances to the next free slot. Returns a Vec of (name, Color) in input order.
-pub fn assign_colors(names: &[&str]) -> Vec<(&str, Color)> {
-    let mut taken = vec![false; PALETTE.len()];
-    let mut result = Vec::with_capacity(names.len());
-
-    for &name in names {
-        let hash_idx = hash_name(name);
-        let mut idx = hash_idx;
-
-        // Linear probe for next free slot
-        while taken[idx] {
-            idx = (idx + 1) % PALETTE.len();
-            // Safety: if all slots taken, wrap around to hash (shouldn't happen with 20 slots)
-            if idx == hash_idx {
-                break;
-            }
+/// Author color as `Color::Rgb`, matching that name's terminal/window exactly.
+/// Shells `stitchpad color <name>`, parses the `#rrggbb`, caches it.
+pub fn color_for(name: &str) -> Color {
+    if let Ok(mut guard) = CACHE.lock() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        if let Some(c) = map.get(name) {
+            return *c;
         }
-
-        taken[idx] = true;
-        result.push((name, Color::Indexed(PALETTE[idx])));
+        let c = resolve(name).unwrap_or(Color::Gray);
+        map.insert(name.to_string(), c);
+        return c;
     }
-
-    result
+    resolve(name).unwrap_or(Color::Gray)
 }
 
-/// Get a single name's color given the full roster (collision-aware).
-/// Use this when you know the full roster and want distinct colors.
-pub fn color_for_with_roster(name: &str, roster: &[&str]) -> Color {
-    let assignments = assign_colors(roster);
-    assignments
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, c)| *c)
-        .unwrap_or(Color::Gray)
+/// Drop the cache so the next `color_for` re-reads the CLI. Call on roster change /
+/// manual refresh so override edits or new members pick up immediately.
+pub fn invalidate() {
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = None;
+    }
 }
 
-/// Simple hash-based color (no collision awareness).
-/// Use only when the full roster is unknown; prefer `color_for_with_roster`.
-pub fn color_for_simple(name: &str) -> Color {
-    let idx = hash_name(name);
-    Color::Indexed(PALETTE[idx])
+fn resolve(name: &str) -> Option<Color> {
+    let out = Command::new("stitchpad").args(["color", name]).output().ok()?;
+    let text = String::from_utf8(out.stdout).ok()?;
+    // CLI prints "#rrggbb" (optionally a fg token too); take the first hex color.
+    text.split_whitespace().find_map(parse_hex)
+}
+
+/// Parse a `#rrggbb` (or bare `rrggbb`) token into `Color::Rgb`. None if not 6 hex.
+fn parse_hex(tok: &str) -> Option<Color> {
+    let h = tok.trim().trim_start_matches('#');
+    if h.len() != 6 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
+    Some(Color::Rgb(r, g, b))
 }
 
 #[cfg(test)]
@@ -81,30 +62,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn seven_members_distinct() {
-        let roster = vec!["dale", "larry", "ernie", "dennis", "Jill", "mark", "john"];
-        let assignments = assign_colors(&roster);
-        let colors: Vec<Color> = assignments.iter().map(|(_, c)| *c).collect();
-
-        // All 7 must be distinct
-        let mut sorted = colors.clone();
-        sorted.sort_by_key(|c| match c { Color::Indexed(i) => *i, _ => 0 });
-        sorted.dedup();
-        assert_eq!(sorted.len(), colors.len(), "collision detected: {:?}", assignments);
+    fn parses_hex_forms() {
+        assert_eq!(parse_hex("#ff1493"), Some(Color::Rgb(255, 20, 147))); // Jill override
+        assert_eq!(parse_hex("5f2f8f"), Some(Color::Rgb(95, 47, 143)));   // ernie, no '#'
+        assert_eq!(parse_hex("#ABCDEF"), Some(Color::Rgb(171, 205, 239))); // case-insensitive
+        assert_eq!(parse_hex("#fff"), None);   // too short
+        assert_eq!(parse_hex("nothex"), None); // non-hex
     }
 
     #[test]
-    fn john_and_jill_distinct() {
-        let roster = vec!["john", "Jill"];
-        let assignments = assign_colors(&roster);
-        assert_ne!(assignments[0].1, assignments[1].1, "john and Jill should have different colors");
-    }
-
-    #[test]
-    fn deterministic() {
-        let roster = vec!["dale", "larry", "ernie"];
-        let a1 = assign_colors(&roster);
-        let a2 = assign_colors(&roster);
-        assert_eq!(a1, a2);
+    fn live_cli_matches_terminal() {
+        // integration: when run inside a real pad, the TUI color for a known override
+        // must equal the terminal hex. Outside a pad the CLI returns its grey fallback
+        // (#808080) — skip the assertion then, so this never fails in CI/crate-dir.
+        match resolve("Jill") {
+            Some(Color::Rgb(0x80, 0x80, 0x80)) | None => { /* no pad context — skip */ }
+            Some(c) => assert_eq!(
+                c,
+                Color::Rgb(0xff, 0x14, 0x93),
+                "Jill must match her window override (#ff1493)"
+            ),
+        }
     }
 }

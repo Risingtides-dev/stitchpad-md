@@ -1,3 +1,4 @@
+mod color;
 mod widgets;
 
 use std::io;
