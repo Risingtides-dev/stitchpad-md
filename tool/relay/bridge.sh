@@ -38,9 +38,28 @@ while :; do
         | sed 's|^\./||' | sort | head -500 | jq -R . | jq -sc .)"
     # collect single-source color map from the pad (flat object: {name: hex})
     colors="$(cd "$proj" && "$SP" color --all 2>/dev/null | jq -R 'split(" ") | {(.[0]): .[1]}' | jq -sc 'add // {}' 2>/dev/null || echo '{}')"
-    # push this pad up (markdown + roster + files + colors)
-    jq -nc --arg pad "$md" --argjson roster "[${roster}]" --argjson files "${files:-[]}" --argjson colors "${colors}" \
-      '{pad:$pad, roster:$roster, files:$files, colors:$colors}' 2>/dev/null \
+    # collect per-agent profiles (role, persona, skills, model, harness)
+    profiles='{}'
+    for _name in $(echo "$roster" | jq -r '.[].name' 2>/dev/null); do
+      _model="$(cat "$padd/.state/model.$_name" 2>/dev/null || echo '')"
+      _persona=""
+      _skills='[]'
+      _role=''
+      # Try to read persona from tool/personas/<name>.md
+      _persona_file="$proj/tool/personas/$(echo "$_name" | tr '[:upper:]' '[:lower:]').md"
+      if [ -f "$_persona_file" ]; then
+        _role="$(head -1 "$_persona_file" | sed 's/^# //')"
+        _persona="$(cat "$_persona_file" | head -5 | tail -4)"
+      fi
+      # Get harness info
+      _harness_info="$(cd "$proj" && "$SP" harness "$_name" 2>/dev/null || echo '')"
+      _harness="$(echo "$_harness_info" | grep -o 'harness=[^ ]*' | cut -d= -f2 | head -1 || echo '')"
+      profiles="$(echo "$profiles" | jq --arg n "$_name" --arg m "$_model" --arg r "$_role" --arg p "$_persona" --argjson s "${_skills:-[]}" --arg h "$_harness" \
+        '. + {($n): {role:$r, persona:$p, skills:$s, model:$m, harness:$h}}')"
+    done
+    # push this pad up (markdown + roster + files + colors + profiles)
+    jq -nc --arg pad "$md" --argjson roster "[${roster}]" --argjson files "${files:-[]}" --argjson colors "${colors}" --argjson profiles "${profiles}" \
+      '{pad:$pad, roster:$roster, files:$files, colors:$colors, profiles:$profiles}' 2>/dev/null \
       | api -X POST "$RELAY/push?pad=$name" --data-binary @- >/dev/null || true
     # drain phone→pad messages for this pad, inject via stitchpad say
     out="$(api "$RELAY/outbox?pad=$name" 2>/dev/null || echo '{"messages":[]}')"
