@@ -383,13 +383,14 @@ EOF
 
     # FIXED 1:1 color map — explicit, maximally distinct, no hash, no drift.
     declare -A _overrides=(
-      [john]='#1e90ff'    # blue
-      [dale]='#00d000'    # green
-      [larry]='#e01010'   # red
-      [ernie]='#9b30ff'   # purple
-      [dennis]='#ff8c00'  # orange
-      [Jill]='#ff1493'    # pink
-      [mark]='#ffd700'    # yellow
+      [smaths]='#1e90ff'   # blue — the human (your input box posts as @smaths)
+      [randy]='#00ffd7'    # teal — orchestrator (was john)
+      [dale]='#00d000'     # green
+      [larry]='#e01010'    # red
+      [ernie]='#9b30ff'    # purple
+      [dennis]='#ff8c00'   # orange
+      [Jill]='#ff1493'     # pink
+      [mark]='#ffd700'     # yellow
     )
 
     # 20-color palette (256-index → hex). Used when no override exists.

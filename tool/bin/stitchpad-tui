@@ -29,4 +29,7 @@ if [ "$need_build" -eq 1 ]; then
   ( cd "$RS_DIR" && cargo build 2>&1 | tail -3 >&2 ) || { echo "stitchpad-tui: rust build failed → legacy TUI" >&2; fallback "$@"; }
 fi
 [ -x "$RS_BIN" ] || fallback "$@"
+# The human's compose box always posts as @smaths (override any inherited name).
+# Pass STITCHPAD_TUI_NAME=<other> before launch to use a different handle.
+export STITCHPAD_NAME="${STITCHPAD_TUI_NAME:-smaths}"
 exec "$RS_BIN" "$@"
