@@ -36,7 +36,11 @@ esac
 # find the agent's window by its title "🧵 <name>" via kitty's own window list.
 # Works without the agent ever having captured anything.
 if [ -z "$sock" ] || [ -z "$win" ]; then
-  sk="${KITTY_SOCKET:-${KITTY_LISTEN_ON:-unix:/tmp/kitty-thoth-675}}"
+  # Dynamic socket discovery: try KITTY_SOCKET/KITTY_LISTEN_ON, then find any kitty socket in /tmp/
+  sk="${KITTY_SOCKET:-${KITTY_LISTEN_ON:-}}"
+  if [ -z "$sk" ]; then
+    sk="unix:$(ls /tmp/kitty-* 2>/dev/null | head -1)"
+  fi
   found="$("$kitty_bin" @ --to "$sk" ls 2>/dev/null | python3 -c '
 import sys,json
 try:
