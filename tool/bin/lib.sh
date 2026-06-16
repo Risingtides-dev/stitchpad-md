@@ -228,44 +228,6 @@ sp_engagement() {
   ' "$PAD_MD"
 }
 
-# ── Author colors (SHARED: TUI + kitty windows use the same function) ──
-# 256-color palette, assigned per name deterministically. sp_color_for is the
-# single source of truth so the pad and the terminal windows always agree.
-SP_PALETTE=(39 208 76 170 214 51 199 220 123 141 203 80)
-sp_color_256() {  # base hash → palette index → 256-color (may collide on small palette)
-  local s="$1" sum=0 i o
-  for ((i=0; i<${#s}; i++)); do printf -v o '%d' "'${s:i:1}"; sum=$((sum + o)); done
-  echo "${SP_PALETTE[$((sum % ${#SP_PALETTE[@]}))]}"
-}
-# Collision-aware: returns the 256-color for <name> such that distinct roster
-# members get distinct colors (walk roster in order; on a taken slot, advance to
-# the next free one). Falls back to the bare hash if no roster/name absent.
-sp_color_for() {
-  local who="$1" n idx start taken="" assigned=""
-  [ -z "$who" ] && return 0
-  # build assignment over the roster deterministically
-  while IFS='|' read -r n _ _ _; do
-    [ -n "$n" ] || continue
-    local sum=0 i o; for ((i=0;i<${#n};i++)); do printf -v o '%d' "'${n:i:1}"; sum=$((sum+o)); done
-    start=$(( sum % ${#SP_PALETTE[@]} )); idx=$start
-    while case " $taken " in *" $idx "*) true;; *) false;; esac; do idx=$(( (idx+1) % ${#SP_PALETTE[@]} )); [ "$idx" = "$start" ] && break; done
-    taken="$taken $idx"
-    [ "$n" = "$who" ] && { echo "${SP_PALETTE[$idx]}"; return 0; }
-  done < <(sp_roster 2>/dev/null)
-  # name not in roster → bare hash
-  sp_color_256 "$who"
-}
-# 256-color → hex bg + readable fg (for kitty set-colors). Echoes "bg fg".
-sp_color_hex() {
-  local code; code="$(sp_color_for "$1")"
-  local -A H=( [39]=0087ff [208]=ff8700 [76]=5fd700 [170]=d75fd7 [214]=ffaf00 [51]=00ffff [199]=ff00af [220]=ffd700 [123]=87ffff [141]=af87ff [203]=ff5f5f [80]=5fd7d7 )
-  local hex="${H[$code]:-888888}" r g b lum fg
-  r=$((16#${hex:0:2})); g=$((16#${hex:2:2})); b=$((16#${hex:4:2}))
-  lum=$(( (299*r + 587*g + 114*b) / 1000 ))
-  [ "$lum" -gt 140 ] && fg=000000 || fg=ffffff
-  echo "#$hex #$fg"
-}
-
 # ── Notifications ────────────────────────────────────────────────────
 sp_notify() {
   local title="$1" msg="$2" sound="${3:-Glass}"

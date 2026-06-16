@@ -13,9 +13,14 @@ BIN_DIR="$(cd -P "$(dirname "$_src")" && pwd)"
 source "$BIN_DIR/lib.sh"
 sp_init_paths || { echo "no .stitchpad here"; exit 1; }
 
-# Author colors: use the SHARED collision-aware sp_color_for from lib.sh so the
-# pad and the kitty windows always agree (one source of truth, all-distinct).
-color_for() { sp_color_for "$1"; }
+# Author colors: use 'stitchpad color' CLI (single source of truth).
+# Outputs #rrggbb hex; convert to ANSI RGB escape.
+color_for() {
+  local hex; hex="$("$BIN_DIR/stitchpad" color "$1" 2>/dev/null)"
+  hex="${hex###}"  # strip leading #
+  local r=$((16#${hex:0:2})) g=$((16#${hex:2:2})) b=$((16#${hex:4:2}))
+  printf '\033[38;2;%d;%d;%dm' "$r" "$g" "$b"
+}
 c()    { printf '\033[38;5;%sm' "$1"; }
 dim()  { printf '\033[2m'; }
 bold() { printf '\033[1m'; }
