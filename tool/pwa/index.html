@@ -148,7 +148,7 @@ const api=(p,o={})=>fetch(RELAY+p,{...o,headers:{authorization:"Bearer "+TOKEN,"
 // SINGLE SOURCE OF TRUTH: colors come from the relay's pad.colors (= `stitchpad
 // color --all`, override-aware). The local OVR/PAL below is ONLY an offline fallback
 // for when /pad hasn't loaded yet — so the web client can't drift from the terminals.
-const OVR={smaths:"#f5f5f5",randy:"#0d9488",dale:"#00d000",larry:"#e01010",ernie:"#9b30ff",dennis:"#ff8c00",Jill:"#ff1493",mark:"#ffd700"};
+const OVR={smaths:"#f1ece4",randy:"#0d9488",dale:"#00d000",larry:"#e01010",ernie:"#9b30ff",dennis:"#ff8c00",Jill:"#ff1493",mark:"#ffd700"};
 const PAL=["#00afff","#ff8700","#5fff00","#d75fff","#ffaf00","#00ffff","#ff00af","#ffd700","#87ffff","#af87ff","#ff5faf","#5fff5f","#ff5fff","#87d787","#d7af5f","#ffff00","#5fffff","#ff87ff","#afffaf","#afffff"];
 let RELAY_COLORS={};   // name->hex from the latest /pad fetch (the source of truth)
 // Accept either shape the relay might send: flat {name:hex} OR [{name,color}].
