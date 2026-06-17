@@ -16,6 +16,16 @@ contains() {
   esac
 }
 
+stop_watcher() {
+  local d="$1"
+  "$SP" daemon stop >/dev/null 2>&1 || true
+  pkill -9 -f "fswatch.*$d" 2>/dev/null || true
+  for _pidfile in "$d"/.stitchpad/.state/alive-ticker.*.pid "$d"/.stitchpad/.state/heartbeat.*.lock/pid; do
+    [ -f "$_pidfile" ] && read -r _pid < "$_pidfile" 2>/dev/null && kill -9 "$_pid" 2>/dev/null || true
+  done
+  sleep 0.2
+}
+
 tmp="$(mktemp -d /tmp/stitchpad-wake-regression.XXXXXX)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -28,9 +38,7 @@ mkdir "$case1"
 cd "$case1"
 "$SP" init --name case1 >/dev/null
 "$SP" join dale codex >/dev/null
-"$SP" daemon stop >/dev/null 2>&1 || true   # isolate wake logic from watcher
-pkill -f "fswatch.*$case1" 2>/dev/null || true
-sleep 0.2
+stop_watcher "$case1"
 STITCHPAD_NAME=tester "$SP" say '@dale first ping' >/dev/null
 STITCHPAD_NAME=larry "$SP" say 'unrelated after first ping' >/dev/null
 out="$("$SP" wake dale)"
@@ -46,14 +54,12 @@ mkdir "$case2"
 cd "$case2"
 "$SP" init --name case2 >/dev/null
 "$SP" join dale codex >/dev/null
-"$SP" daemon stop >/dev/null 2>&1 || true   # isolate wake logic from watcher
-pkill -f "fswatch.*$case2" 2>/dev/null || true  # daemon stop may orphan fswatch
-sleep 0.2
+stop_watcher "$case2"
 STITCHPAD_NAME=tester "$SP" say '@dale one-shot ping' >/dev/null
-first="$("$SP" wake dale)"
+first="$("$SP" wake dale --peek)"
 contains "$first" '@dale one-shot ping' || fail 'first wake missed addressed message'
 STITCHPAD_NAME=larry "$SP" say 'unrelated status update' >/dev/null
-second="$("$SP" wake dale)"
+second="$("$SP" wake dale --peek)"
 contains "$second" '@dale one-shot ping' || fail 'unrelated commit incorrectly cleared unanswered mention'
 STITCHPAD_NAME=dale "$SP" say '@tester addressed reply clears ping' >/dev/null
 third="$("$SP" wake dale)"
@@ -70,9 +76,7 @@ cd "$case3"
 "$SP" init --name case3 >/dev/null
 "$SP" join larry codex >/dev/null
 "$SP" join dale claude >/dev/null
-"$SP" daemon stop >/dev/null 2>&1 || true   # isolate wake logic from watcher
-pkill -f "fswatch.*$case3" 2>/dev/null || true
-sleep 0.2
+stop_watcher "$case3"
 STITCHPAD_NAME=tester "$SP" say '@larry identity ping' >/dev/null
 unbound="$(printf '{"cwd":"%s","stop_hook_active":false}' "$case3" | "$SP" hook)"
 [ -z "$unbound" ] || fail 'unbound hook should not guess an identity'
@@ -88,9 +92,7 @@ mkdir "$case4"
 cd "$case4"
 "$SP" init --name case4 >/dev/null
 "$SP" join larry codex >/dev/null
-"$SP" daemon stop >/dev/null 2>&1 || true   # isolate wake logic from watcher
-pkill -f "fswatch.*$case4" 2>/dev/null || true
-sleep 0.2
+stop_watcher "$case4"
 STITCHPAD_NAME=dale "$SP" say 'dale @larry inline ping' >/dev/null
 inline="$(STITCHPAD_NAME=larry "$SP" wake --peek)"
 contains "$inline" 'dale @larry inline ping' || fail 'inline @mention did not wake larry'

@@ -24,7 +24,14 @@ NC='\033[0m' # No Color
 PASS=0
 FAIL=0
 
-pad_dir="${STITCHPAD_CWD:-$(pwd)}"
+if [ -n "${STITCHPAD_CWD:-}" ]; then
+  pad_dir="$STITCHPAD_CWD"
+else
+  pad_dir="$(mktemp -d)"
+  trap 'rm -rf "$pad_dir"' EXIT
+  cd "$pad_dir"
+  "$HOME/.stitchpad/bin/stitchpad" init --name identity-regtest >/dev/null
+fi
 PAD="${pad_dir}/.stitchpad/stitchpad.md"
 
 # ── helpers ────────────────────────────────────────────────────────────
