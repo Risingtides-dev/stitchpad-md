@@ -60,6 +60,18 @@ if not wired(stop):
     json.dump(d,open(p,"w"),indent=2)
 PY
 
+  # Claude PreToolUse claim hook (hard-deny on Write/Edit for claimed files)
+  CLAIM_SHIM="$STD_HOME/adapters/claim-hook.sh"
+  python3 - "$CLAUDE_SETTINGS" "$CLAIM_SHIM" <<'PY' && echo "✓ Claude PreToolUse claim hook wired"
+import json,sys
+p,shim=sys.argv[1],sys.argv[2]
+d=json.load(open(p)); hooks=d.setdefault("hooks",{}); pre=hooks.setdefault("PreToolUse",[])
+def wired(s): return any(h.get("command")==shim for blk in s for h in blk.get("hooks",[]))
+if not wired(pre):
+    pre.append({"matcher":"Write|Edit|MultiEdit","hooks":[{"type":"command","command":shim,"timeout":10}]})
+    json.dump(d,open(p,"w"),indent=2)
+PY
+
   # Codex: ~/.codex/hooks.json  hooks.Stop[]
   CODEX_HOOKS="$HOME/.codex/hooks.json"
   if [ -d "$HOME/.codex" ] || [ -f "$CODEX_HOOKS" ]; then
