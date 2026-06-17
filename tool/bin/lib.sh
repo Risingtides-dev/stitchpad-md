@@ -290,9 +290,19 @@ sp_any_alive() {
 sp_watcher_alive() {
   local watch_lock="$PAD_STATE/watch.lock.d"
   [ -d "$watch_lock" ] || return 1
+  local ts now age
+  ts=$(cat "$watch_lock/ts" 2>/dev/null)
+  [ -n "$ts" ] && ts=$(date -ju -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s 2>/dev/null || echo 0)
+  [ "$ts" = "0" ] && ts=$(stat -f %m "$watch_lock" 2>/dev/null || stat -c %Y "$watch_lock" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  age=$(( now - ts ))
+  # Grace period (< 5s): trust the lock even if PID not registered yet.
+  # The watcher writes its real PID within 100ms of startup.
+  [ "$age" -lt 5 ] && return 0
+  # Older lock: check PID liveness.
   local p; p="$(cat "$watch_lock/pid" 2>/dev/null)"
   [ -n "$p" ] && kill -0 "$p" 2>/dev/null && return 0
-  # Stale lock — PID dead. Clean it so we can re-acquire.
+  # Dead or stale — clean so we can re-acquire.
   rm -rf "$watch_lock" 2>/dev/null || true
   return 1
 }
@@ -314,11 +324,12 @@ ensure_watcher() {
     rm -rf "$watch_lock" 2>/dev/null || true
     mkdir "$watch_lock" 2>/dev/null || return 0
   fi
-  # Spawn the watcher and record ITS pid immediately so losers see us.
-  ( trap 'rm -rf "$watch_lock"' EXIT
-    STITCHPAD_PAD_DIR="$PAD_DIR" bash "$STITCHPAD_HOME/bin/watch.sh" >>"$watch_log" 2>&1
-  ) &
-  echo $! > "$watch_lock/pid"
-  disown
+  # Spawn the watcher. No trap — the watcher removes the lock on exit.
+  ( STITCHPAD_PAD_DIR="$PAD_DIR" bash "$STITCHPAD_HOME/bin/watch.sh" >>"$watch_log" 2>&1 ) &
+  # Placeholder PID+ts so concurrent callers see a fresh lock during the grace
+  # period. The watcher overwrites both with its real PID on startup.
+  echo $$ > "$watch_lock/pid"
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$watch_lock/ts"
+  disown %-
   return 0
 }

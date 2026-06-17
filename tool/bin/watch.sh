@@ -22,6 +22,16 @@ BIN_DIR="$(cd -P "$(dirname "$_src")" && pwd)"
 source "$BIN_DIR/lib.sh"
 sp_init_paths || { echo "no stitchpad"; exit 1; }
 
+# Self-register: overwrite the lock pid file with MY real PID. The spawner
+# writes $! (subshell PID) as a placeholder, but the actual watcher process has
+# a different PID after exec. This is the authoritative registration.
+if [ -d "$PAD_STATE/watch.lock.d" ]; then
+  echo $$ > "$PAD_STATE/watch.lock.d/pid"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$PAD_STATE/watch.lock.d/ts"
+fi
+# Ensure lock cleanup on ANY exit (normal, crash, heartbeat timeout).
+trap 'rm -rf "$PAD_STATE/watch.lock.d" 2>/dev/null' EXIT INT TERM
+
 # Per-user mention counters live in state.
 count_file() { echo "$PAD_STATE/count.$1"; }
 
@@ -46,7 +56,7 @@ fire_adapter() {
   local name="$1" adapter="$2" wake="$3" target="$4"
   local script="$ADAPTER_DIR/$adapter.sh"
   if [ ! -f "$script" ]; then
-    echo "[stitchpad] no adapter '$adapter' for @$name (looked in $ADAPTER_DIR)"; return 0
+    echo "[stitchpad] no adapter '$adapter' for @$name (looked in $ADAPTER_DIR)"; return 2
   fi
   local taskfile; taskfile="$(mktemp)"
   sp_latest_to "$name" > "$taskfile"

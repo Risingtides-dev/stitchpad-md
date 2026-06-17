@@ -26,6 +26,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { execFile } from "node:child_process";
+import { readdir } from "node:fs/promises";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -43,13 +44,88 @@ const PAD_CWD = process.env.STITCHPAD_CWD || process.cwd();
 
 // `me` pins STITCHPAD_NAME for this call so the CLI derives the sender from
 // identity, not a trusted arg.
-async function sp(args, me) {
+async function sp(args, me, extraEnv = {}) {
   const { stdout, stderr } = await execFileP(CLI, args, {
     cwd: PAD_CWD,
-    env: { ...process.env, STITCHPAD_HOME, ...(me ? { STITCHPAD_NAME: me } : {}) },
+    env: { ...process.env, STITCHPAD_HOME, ...extraEnv, ...(me ? { STITCHPAD_NAME: me } : {}) },
     maxBuffer: 1024 * 1024,
   });
   return (stdout || "") + (stderr ? `\n${stderr}` : "");
+}
+
+function envValue(text, key) {
+  const match = text.match(new RegExp(`(?:^|\\s)${key}=([^\\s]+)`));
+  return match ? match[1] : "";
+}
+
+async function parentKittyEnv() {
+  try {
+    const { stdout } = await execFileP("ps", ["eww", "-p", String(process.ppid), "-o", "command="], {
+      maxBuffer: 1024 * 1024,
+    });
+    return {
+      sock: envValue(stdout, "KITTY_LISTEN_ON") || envValue(stdout, "KITTY_SOCKET"),
+      win: envValue(stdout, "KITTY_WINDOW_ID"),
+    };
+  } catch {
+    return { sock: "", win: "" };
+  }
+}
+
+async function kittySockets(preferred) {
+  const sockets = [];
+  const add = (sock) => {
+    if (sock && !sockets.includes(sock)) sockets.push(sock);
+  };
+  add(preferred);
+  try {
+    for (const entry of await readdir("/tmp")) {
+      if (entry.startsWith("kitty-")) add(`unix:/tmp/${entry}`);
+    }
+  } catch {
+    // No socket directory or no permission; join can still fall back to hook wake.
+  }
+  return sockets;
+}
+
+function findWindowForPid(kittyState, pid) {
+  const needle = Number(pid);
+  for (const osWindow of kittyState) {
+    for (const tab of osWindow.tabs || []) {
+      for (const win of tab.windows || []) {
+        if (Number(win.pid) === needle) return win.id;
+        for (const proc of win.foreground_processes || []) {
+          if (Number(proc.pid) === needle) return win.id;
+        }
+      }
+    }
+  }
+  return "";
+}
+
+async function discoverKittyTarget() {
+  let sock = process.env.KITTY_LISTEN_ON || process.env.KITTY_SOCKET || "";
+  let win = process.env.KITTY_WINDOW_ID || "";
+
+  if (!sock || !win) {
+    const parentEnv = await parentKittyEnv();
+    sock ||= parentEnv.sock;
+    win ||= parentEnv.win;
+  }
+  if (sock && win) return { sock, win };
+
+  for (const candidate of await kittySockets(sock)) {
+    try {
+      const { stdout } = await execFileP("kitty", ["@", "--to", candidate, "ls"], {
+        maxBuffer: 4 * 1024 * 1024,
+      });
+      const found = findWindowForPid(JSON.parse(stdout), process.ppid);
+      if (found) return { sock: candidate, win: String(found) };
+    } catch {
+      // Try the next socket.
+    }
+  }
+  return { sock: "", win: "" };
 }
 
 // ── Identity, server-side ─────────────────────────────────────────────
@@ -65,14 +141,14 @@ const SESSION_ID =
   process.env.CODEX_SESSION_ID ||
   "";
 
-async function bindSession(name) {
+async function bindSession(name, extraEnv = {}) {
   ME = name;
   // With a session id (claude/codex): bind sessions/<id> so the Stop hook resolves
   // it from its payload. Without one (pi exposes no session id): bind the pad-level
   // default identity, which the pi extension's wake reads. pi is single-identity
   // per pad, so a pad default is correct, not a collision risk.
   const arg = SESSION_ID || "-";   // "-" = pad default (see CLI bind-session)
-  await sp(["bind-session", arg, name], name).catch(() => {});
+  await sp(["bind-session", arg, name], name, extraEnv).catch(() => {});
 }
 
 const server = new Server(
@@ -156,12 +232,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         if (!["claude", "codex", "pi"].includes(adapter)) {
           return text("adapter must be one of: claude, codex, pi");
         }
-        // Capture this kitty window as the wake target: "<socket>|<window_id>".
-        // The MCP server runs inside the agent's process, so it sees the window's
-        // own KITTY_LISTEN_ON + KITTY_WINDOW_ID. Watcher uses kitty to wake here.
-        const sock = process.env.KITTY_LISTEN_ON || "";
-        const win = process.env.KITTY_WINDOW_ID || "";
+        // Capture this kitty window as the wake target. Codex may scrub KITTY_*
+        // from the MCP child even when the parent Codex process is in kitty, so
+        // recover it from the parent env or kitty's window list when needed.
+        const { sock, win } = await discoverKittyTarget();
         const target = sock && win ? `${sock}@@${win}` : "-";   // @@ not | (roster is pipe-delimited)
+        const kittyEnv = sock && win ? { KITTY_LISTEN_ON: sock, KITTY_WINDOW_ID: win } : {};
         // Tag the kitty window+tab with the agent's name so you can see who's who.
         if (sock && win) {
           await execFileP("kitty", ["@", "--to", sock, "set-window-title", "--match", `id:${win}`, `🧵 ${a.name}`]).catch(() => {});
@@ -169,7 +245,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         }
         // adapter column = "kitty" (the universal wake); runtime metadata records
         // the actual harness (claude/codex/pi) for TUI roster classifiers.
-        out = await sp(["join", a.name, "kitty", "push", target]);
+        out = await sp(["join", a.name, "kitty", "push", target], undefined, kittyEnv);
         await sp(["meta", "set", a.name, "runtime", adapter]).catch(() => {});
         const model =
           process.env.STITCHPAD_MODEL ||
@@ -180,7 +256,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         if (model) {
           await sp(["meta", "set", a.name, "model", model]).catch(() => {});
         }
-        await bindSession(a.name);   // hold identity + write session record for the hook
+        await bindSession(a.name, kittyEnv);   // hold identity + write session record for the hook
         out += target === "-"
           ? `\n(you are @${a.name}, but no kitty window detected — external wake won't work unless you run in kitty. Hook-based turn-end wake still applies.)`
           : `\n(you are @${a.name}; @${a.name} mentions wake this kitty window. Reply with the say tool — identity is fixed server-side.)`;

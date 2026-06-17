@@ -72,7 +72,20 @@ EOF
 
   join)
     sp_init_paths || exit 1
-    who="${1:?usage: stitchpad join <name> <adapter> [wake] [target]}"
+    # Parse optional flags: --role <role> [--level junior|senior|lead|principal]
+    _role=""; _level=""
+    _args=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --role) _role="${2:-}"; shift 2 ;;
+        --level) _level="${2:-}"; shift 2 ;;
+        --) shift; _args+=("$@"); break ;;
+        --*) echo "stitchpad: unknown join flag $1" >&2; exit 1 ;;
+        *) _args+=("$1"); shift ;;
+      esac
+    done
+    set -- "${_args[@]}"
+    who="${1:?usage: stitchpad join <name> <adapter> [wake] [target] [--role <role>] [--level <level>]}"
     adapter="${2:?adapter required (e.g. pi, claude, codex, mcp)}"
     wake="${3:-pull}"; target="${4:--}"
     sp_lock || exit 1
@@ -86,13 +99,18 @@ EOF
     ' "$PAD_MD" > "$tmp" && mv "$tmp" "$PAD_MD"
     sp_system "@$who joined the stitchpad ($adapter)"
     sp_commit "roster: + $who ($adapter/$wake)"
+    # Persist role/level for bridge profiles push + roster cards.
+    [ -n "$_role" ] && printf '%s' "$_role" > "$PAD_STATE/role.$who"
+    [ -n "$_level" ] && printf '%s' "$_level" > "$PAD_STATE/level.$who"
     sp_unlock
     echo "✓ $who joined (adapter=$adapter wake=$wake)"
-    # PERSONA INJECTION: if a join-pack exists for this name, print it so the
-    # joining agent assumes its role (persona + skill glossary, skills lazy-loaded
-    # on demand). The agent reads this as its operating identity. Glossary only —
-    # skills are pulled with /skill:<name> when a task needs one.
-    _pack="$STITCHPAD_HOME/personas/$who.md"
+    # PERSONA INJECTION: role-based join takes precedence; fall back to name-based pack.
+    _pack=""
+    if [ -n "$_role" ] && [ -f "$STITCHPAD_HOME/personas/library/$_role.md" ]; then
+      _pack="$STITCHPAD_HOME/personas/library/$_role.md"
+    elif [ -f "$STITCHPAD_HOME/personas/$who.md" ]; then
+      _pack="$STITCHPAD_HOME/personas/$who.md"
+    fi
     if [ -f "$_pack" ]; then
       echo
       echo "── your stitchpad role (assume this persona) ──"
@@ -682,7 +700,7 @@ PY
     ;;
 
   start)  sp_init_paths || exit 1; ensure_watcher; echo "→ watcher ensured"; ;;
-  stop)   sp_init_paths || exit 1; rm -rf "$PAD_STATE/watch.lock.d" 2>/dev/null; echo "→ watcher stopped"; ;;
+  stop)   sp_init_paths || exit 1; if [ -f "$PAD_STATE/watch.lock.d/pid" ]; then kill "$(cat "$PAD_STATE/watch.lock.d/pid")" 2>/dev/null || true; fi; rm -rf "$PAD_STATE/watch.lock.d" 2>/dev/null; echo "→ watcher stopped"; ;;
   status) sp_init_paths || exit 1; sp_watcher_alive && echo "running (pid $(cat "$PAD_STATE/watch.lock.d/pid" 2>/dev/null))" || echo "stopped"; ;;
   restart) sp_init_paths || exit 1; rm -rf "$PAD_STATE/watch.lock.d" 2>/dev/null; ensure_watcher; echo "→ watcher restarted"; ;;
   watch)   exec "$STITCHPAD_HOME/bin/watch.sh" ;;
@@ -947,12 +965,24 @@ for os_win in data:
         fi
       fi
 
+      # Compute online from heartbeat freshness + pid liveness
+      _online="offline"
+      _alive="$PAD_STATE/alive.$_name"
+      if [ -f "$_alive" ]; then
+        _alive_ts="$(stat -f %m "$_alive" 2>/dev/null || stat -c %Y "$_alive" 2>/dev/null || echo 0)"
+        _alive_age=$(( $(date +%s) - _alive_ts ))
+        if [ "$_alive_age" -lt 90 ]; then
+          _alive_pid="$(grep -o '"pid":[0-9]*' "$_alive" 2>/dev/null | head -1 | cut -d: -f2)"
+          [ -n "$_alive_pid" ] && kill -0 "$_alive_pid" 2>/dev/null && _online="online"
+        fi
+      fi
+
       # Report
       if [ ${#issues[@]} -eq 0 ]; then
         if [ -n "$_harness" ]; then
-          printf '  ✓ @%s (%s/%s) %s — healthy\n' "$_name" "$_adapter" "$_wake" "$_harness"
+          printf '  ✓ @%s (%s/%s) %s — %s\n' "$_name" "$_adapter" "$_wake" "$_harness" "$_online"
         else
-          printf '  ✓ @%s (%s/%s) — healthy\n' "$_name" "$_adapter" "$_wake"
+          printf '  ✓ @%s (%s/%s) — %s\n' "$_name" "$_adapter" "$_wake" "$_online"
         fi
       else
         for _issue in "${issues[@]}"; do

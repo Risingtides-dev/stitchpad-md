@@ -29,6 +29,8 @@ cd "$case1"
 "$SP" init --name case1 >/dev/null
 "$SP" join dale codex >/dev/null
 "$SP" daemon stop >/dev/null 2>&1 || true   # isolate wake logic from watcher
+pkill -f "fswatch.*$case1" 2>/dev/null || true
+sleep 0.2
 STITCHPAD_NAME=tester "$SP" say '@dale first ping' >/dev/null
 STITCHPAD_NAME=larry "$SP" say 'unrelated after first ping' >/dev/null
 out="$("$SP" wake dale)"
@@ -45,6 +47,8 @@ cd "$case2"
 "$SP" init --name case2 >/dev/null
 "$SP" join dale codex >/dev/null
 "$SP" daemon stop >/dev/null 2>&1 || true   # isolate wake logic from watcher
+pkill -f "fswatch.*$case2" 2>/dev/null || true  # daemon stop may orphan fswatch
+sleep 0.2
 STITCHPAD_NAME=tester "$SP" say '@dale one-shot ping' >/dev/null
 first="$("$SP" wake dale)"
 contains "$first" '@dale one-shot ping' || fail 'first wake missed addressed message'
@@ -67,6 +71,8 @@ cd "$case3"
 "$SP" join larry codex >/dev/null
 "$SP" join dale claude >/dev/null
 "$SP" daemon stop >/dev/null 2>&1 || true   # isolate wake logic from watcher
+pkill -f "fswatch.*$case3" 2>/dev/null || true
+sleep 0.2
 STITCHPAD_NAME=tester "$SP" say '@larry identity ping' >/dev/null
 unbound="$(printf '{"cwd":"%s","stop_hook_active":false}' "$case3" | "$SP" hook)"
 [ -z "$unbound" ] || fail 'unbound hook should not guess an identity'
@@ -83,6 +89,8 @@ cd "$case4"
 "$SP" init --name case4 >/dev/null
 "$SP" join larry codex >/dev/null
 "$SP" daemon stop >/dev/null 2>&1 || true   # isolate wake logic from watcher
+pkill -f "fswatch.*$case4" 2>/dev/null || true
+sleep 0.2
 STITCHPAD_NAME=dale "$SP" say 'dale @larry inline ping' >/dev/null
 inline="$(STITCHPAD_NAME=larry "$SP" wake --peek)"
 contains "$inline" 'dale @larry inline ping' || fail 'inline @mention did not wake larry'

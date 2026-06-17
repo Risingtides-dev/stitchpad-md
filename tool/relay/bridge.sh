@@ -44,6 +44,8 @@ while :; do
     # it into a JSON array before iterating — bare it fails jq and the loop never runs.
     for _name in $(echo "[$roster]" | jq -r '.[].name' 2>/dev/null); do
       _model="$(cat "$padd/.state/model.$_name" 2>/dev/null || echo '')"
+      _role="$(cat "$padd/.state/role.$_name" 2>/dev/null || echo '')"
+      _level="$(cat "$padd/.state/level.$_name" 2>/dev/null || echo '')"
       _persona=""
       _skills='[]'
       _role=''
@@ -56,7 +58,7 @@ while :; do
       [ -d "$_persona_dir" ] || _persona_dir="$HOME/.stitchpad/tool/personas"  # last-resort
       _persona_file="$_persona_dir/$(echo "$_name" | tr '[:upper:]' '[:lower:]').md"
       if [ -f "$_persona_file" ]; then
-        _role="$(grep -m1 '^ROLE:' "$_persona_file" | sed 's/^ROLE:[[:space:]]*//')"
+        [ -z "$_role" ] && _role="$(grep -m1 '^ROLE:' "$_persona_file" | sed 's/^ROLE:[[:space:]]*//')"
         [ -z "$_role" ] && _role="$(head -1 "$_persona_file" | sed 's/^# //')"
         _persona="$(grep -m1 '^PERSONA:' "$_persona_file" | sed 's/^PERSONA:[[:space:]]*//')"
         _skills="$(python3 -c "
@@ -97,8 +99,19 @@ print(json.dumps(skills))
           _status="working"
         fi
       fi
-      profiles="$(echo "$profiles" | jq --arg n "$_name" --arg m "$_model" --arg r "$_role" --arg p "$_persona" --argjson s "${_skills:-[]}" --arg h "$_adapter" --arg st "$_status" \
-        '. + {($n): {role:$r, persona:$p, skills:$s, model:$m, harness:$h, status:$st}}')"
+      # Online: heartbeat file fresh (<90s) AND pid still alive
+      _online="false"
+      _alive="$padd/.state/alive.$_name"
+      if [ -f "$_alive" ]; then
+        _alive_ts="$(stat -f %m "$_alive" 2>/dev/null || stat -c %Y "$_alive" 2>/dev/null || echo 0)"
+        _alive_age=$(( $(date +%s) - _alive_ts ))
+        if [ "$_alive_age" -lt 90 ]; then
+          _alive_pid="$(grep -o '"pid":[0-9]*' "$_alive" 2>/dev/null | head -1 | cut -d: -f2)"
+          [ -n "$_alive_pid" ] && kill -0 "$_alive_pid" 2>/dev/null && _online="true"
+        fi
+      fi
+      profiles="$(echo "$profiles" | jq --arg n "$_name" --arg m "$_model" --arg r "$_role" --arg lv "$_level" --arg p "$_persona" --argjson s "${_skills:-[]}" --arg h "$_adapter" --arg st "$_status" --arg on "$_online"\
+        '. + {($n): {role:$r, level:$lv, persona:$p, skills:$s, model:$m, harness:$h, status:$st, online:$on}})')"
     done
     # push this pad up (markdown + roster + files + colors + profiles)
     jq -nc --arg pad "$md" --argjson roster "[${roster}]" --argjson files "${files:-[]}" --argjson colors "${colors}" --argjson profiles "${profiles}" \
