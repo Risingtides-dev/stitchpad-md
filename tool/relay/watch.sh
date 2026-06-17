@@ -34,6 +34,13 @@ if [ -z "$KITTY_SOCK" ] || [ -z "$KITTY_WIN" ]; then
 fi
 
 LAST_SEEN=0  # track mention ordinal to avoid re-firing
+SEEN_FILE="${STITCHPAD_HOME:-$HOME/.stitchpad}/.state/relay-watch-seen.${HANDLE}"
+mkdir -p "$(dirname "$SEEN_FILE")" 2>/dev/null || true
+# Restore cursor from previous run (survives restart)
+if [ -f "$SEEN_FILE" ]; then
+  LAST_SEEN=$(cat "$SEEN_FILE" 2>/dev/null || echo 0)
+  echo "[relay-watch] restored cursor: seen ${LAST_SEEN} mentions"
+fi
 echo "[relay-watch] polling ${RELAY} as ${HANDLE} every ${POLL_INTERVAL}s"
 
 while true; do
@@ -66,6 +73,7 @@ while true; do
       "stitchpad wake ${HANDLE}"$'\n' 2>/dev/null || true
 
     LAST_SEEN="$mention_count"
+    echo "$LAST_SEEN" > "$SEEN_FILE"
   fi
 
   sleep "$POLL_INTERVAL"
