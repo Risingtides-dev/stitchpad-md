@@ -14,3 +14,5 @@ src="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$src/bin/lib.sh" 2>/dev/null || true
 msg="$(head -c 240 "$taskfile" 2>/dev/null)"
 sp_notify "stitchpad → @$name" "${msg:-new mention}" 2>/dev/null || true
+# Cannot inject into a live codex TUI — defer to the Stop hook / host polling.
+exit 3
