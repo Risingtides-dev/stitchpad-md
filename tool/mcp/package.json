@@ -1,0 +1,11 @@
+{
+  "name": "stitchpad-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "stitchpad MCP server — join/say/read/who/leave over the markdown bus",
+  "bin": { "stitchpad-mcp": "server.mjs" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

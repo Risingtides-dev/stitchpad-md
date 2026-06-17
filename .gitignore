@@ -13,3 +13,7 @@ tool/tui-rs/target/
 
 # stray test runtime under tool/
 tool/.state/
+
+# mcp server deps (installed via npm install)
+tool/mcp/node_modules/
+tool/mcp/package-lock.json
