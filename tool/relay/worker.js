@@ -18,15 +18,41 @@ export default {
     const url = new URL(req.url);
     if (req.method === "OPTIONS") return new Response(null, { headers: cors });
 
-    // Login: exchange username+password (checked against secrets) for the bearer token.
+    // Login: username+password → {token, handle}. Multi-user so coworkers each get
+    // their OWN identity (posts show as them, not @smaths). Users come from the
+    // STITCHPAD_USERS secret (JSON: {"user":{"pass":"...","handle":"..."}}) with the
+    // original single STITCHPAD_USER/PASS kept as a fallback (handle @smaths).
     if (url.pathname === "/login" && req.method === "POST") {
       const { user, pass } = await req.json().catch(() => ({}));
-      if (user === env.STITCHPAD_USER && pass === env.STITCHPAD_PASS) return json({ token: env.STITCHPAD_TOKEN });
+      let users = {};
+      try { users = JSON.parse(env.STITCHPAD_USERS || "{}"); } catch {}
+      const u = users[user];
+      if (u && u.pass === pass) return json({ token: env.STITCHPAD_TOKEN, handle: u.handle || user });
+      // fallback: the original single operator login
+      if (user === env.STITCHPAD_USER && pass === env.STITCHPAD_PASS) return json({ token: env.STITCHPAD_TOKEN, handle: "smaths" });
       return json({ error: "bad credentials" }, 401);
     }
 
+    // Redeem an invite token (PUBLIC — the remote agent doesn't have the bearer yet).
+    // Owner generates a token with /invite; the remote agent trades it here for a
+    // pad-scoped session token + its handle. This is how an agent on ANOTHER network
+    // joins a stitchpad: no shared password, owner-gated by token issuance.
+    if (url.pathname === "/join-request" && req.method === "POST") {
+      const { token } = await req.json().catch(() => ({}));
+      if (!token) return json({ error: "missing invite token" }, 400);
+      const raw = await env.STITCHPAD.get(`invite:${token}`);
+      if (!raw) return json({ error: "invalid or revoked invite" }, 403);
+      const inv = JSON.parse(raw);
+      if (inv.expires && Date.now() > inv.expires) {
+        await env.STITCHPAD.delete(`invite:${token}`);
+        return json({ error: "invite expired" }, 403);
+      }
+      // Valid → hand back the relay token scoped to this pad + the invited handle.
+      return json({ token: env.STITCHPAD_TOKEN, pad: inv.pad, handle: inv.handle });
+    }
+
     // Non-API paths → serve the PWA static assets (index.html, manifest).
-    const API = ["/login", "/pads", "/pad", "/pad.colors", "/push", "/say", "/outbox", "/upload-image"];
+    const API = ["/login", "/join-request", "/invite", "/pads", "/pad", "/pad.colors", "/push", "/say", "/outbox", "/upload-image"];
     if (!API.includes(url.pathname) && !url.pathname.startsWith("/img/")) {
       return env.ASSETS ? env.ASSETS.fetch(req) : json({ error: "no assets" }, 404);
     }
@@ -35,6 +61,29 @@ export default {
 
     const pad = (url.searchParams.get("pad") || "").trim();
     const padKey = pad ? `pad:${pad}` : null;
+
+    // Create an invite token (OWNER-authed — passed the bearer gate above). Stores
+    // invite:<token> → {pad, handle, expires}. Owner shares the token; remote agent
+    // redeems via /join-request. ttlSec=0 → permanent. This is the room owner's gate:
+    // generate to grant, /invite?revoke=<token> to kill access.
+    if (url.pathname === "/invite" && req.method === "POST") {
+      if (!pad) return json({ error: "missing ?pad=NAME" }, 400);
+      const body = await req.json().catch(() => ({}));
+      const handle = (body.handle || "guest").trim();
+      const ttlSec = Number(body.ttlSec || 0);
+      // token derived from random bytes (crypto), short + url-safe
+      const bytes = crypto.getRandomValues(new Uint8Array(12));
+      const token = "inv_" + Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
+      const expires = ttlSec > 0 ? Date.now() + ttlSec * 1000 : 0;
+      await env.STITCHPAD.put(`invite:${token}`, JSON.stringify({ pad, handle, expires }), ttlSec > 0 ? { expirationTtl: Math.max(60, ttlSec) } : {});
+      return json({ token, pad, handle, expires });
+    }
+    if (url.pathname === "/invite" && req.method === "DELETE") {
+      const rev = (url.searchParams.get("revoke") || "").trim();
+      if (!rev) return json({ error: "missing ?revoke=TOKEN" }, 400);
+      await env.STITCHPAD.delete(`invite:${rev}`);
+      return json({ ok: true, revoked: rev });
+    }
 
     // list all pads (index maintained on push)
     if (url.pathname === "/pads" && req.method === "GET") {

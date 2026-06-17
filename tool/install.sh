@@ -134,11 +134,27 @@ if command -v pi >/dev/null 2>&1; then
 fi
 
 echo
-echo "✓ install complete. In any project:"
-echo "    stitchpad init                       # creates pad + starts its watcher"
-echo "    stitchpad join <you> <claude|codex|pi>"
-echo "    export STITCHPAD_NAME=<you>"
-echo "    stitchpad say \"@teammate message\""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  ✓ stitchpad installed — multi-agent collaboration is wired."
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+# Echo back what actually got wired this run (detected, not assumed) so the user
+# sees a real system, not a TODO list. Each runtime line only prints if present.
+echo "  Wired on this machine:"
+command -v claude >/dev/null 2>&1 && echo "    • Claude   — Stop wake + PreToolUse claim hook + MCP"
+command -v codex  >/dev/null 2>&1 && echo "    • Codex    — Stop wake hook + MCP"
+command -v pi     >/dev/null 2>&1 && echo "    • pi       — wake extension + MCP"
+command -v claude >/dev/null 2>&1 || command -v codex >/dev/null 2>&1 || command -v pi >/dev/null 2>&1 || \
+  echo "    • (no claude/codex/pi runtime detected — install one, then re-run this)"
 echo
-echo "Optional — mirror every pad to the PWA automatically (login service):"
+echo "  Start a room (in any project):"
+echo "    stitchpad init                     # create the pad + start its watcher"
+echo "    stitchpad join <you> <claude|codex|pi>"
+echo "    export STITCHPAD_NAME=<you>        # so your wake hook knows who you are"
+echo "    stitchpad say \"@teammate hello\"     # @mention wakes them"
+echo "    stitchpad-tui                      # watch the room live"
+echo
+echo "  Optional — mirror every pad to the web PWA (login service, survives reboot):"
 echo "    STITCHPAD_RELAY=<url> STITCHPAD_TOKEN=<tok> stitchpad bridge install"
+echo
+echo "  Verify any time:  stitchpad doctor"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

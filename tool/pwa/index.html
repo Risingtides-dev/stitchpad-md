@@ -141,7 +141,7 @@ html,body{margin:0;height:100%;font:15px/1.46 -apple-system,system-ui,"Segoe UI"
 const RELAY=location.origin;
 // Identity follows the handle you logged in with (persisted), not a hardcoded name.
 // Auth is still the shared token; this makes attribution + colors dynamic per user.
-let me="smaths";  // operator always posts as @smaths (login handle ≠ posting handle)
+let me=localStorage.getItem("sp_me")||"smaths";  // posting handle (server-assigned at login; persists across reloads)
 let TOKEN=localStorage.getItem("sp_token")||"";
 let pad=localStorage.getItem("sp_pad")||"";
 const api=(p,o={})=>fetch(RELAY+p,{...o,headers:{authorization:"Bearer "+TOKEN,"content-type":"application/json",...(o.headers||{})}});
@@ -374,10 +374,11 @@ function setMe(name){me=name||"smaths";localStorage.setItem("sp_me",me);
 async function doLogin(){const user=document.getElementById("lu").value.trim(),pass=document.getElementById("lp").value;le.textContent="";
   const r=await fetch(RELAY+"/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({user,pass})});
   if(!r.ok){le.textContent="wrong username or password";return;}
-  // Posting identity is ALWAYS @smaths (the operator's roster handle) — NOT the
-  // login username. Login = who you authenticate as (smathdaddy); posting handle =
-  // who you are on the pad (smaths). Decoupled so the PWA and TUI both post as @smaths.
-  TOKEN=(await r.json()).token;localStorage.setItem("sp_token",TOKEN);setMe("smaths");startApp();}
+  // Posting identity = the handle the SERVER assigns this login, not the typed
+  // username. Operator login (smathdaddy) → @smaths; a coworker login → their own
+  // handle. This is how remote teammates get a distinct identity on the pad while
+  // login stays decoupled from posting handle.
+  const auth=await r.json();TOKEN=auth.token;localStorage.setItem("sp_token",TOKEN);setMe(auth.handle||"smaths");startApp();}
 document.getElementById("lb").onclick=doLogin;
 document.getElementById("lp").addEventListener("keydown",e=>{if(e.key==="Enter")doLogin();});
 if(TOKEN)startApp(); else loginEl.classList.add("show");
@@ -394,10 +395,11 @@ function agentCard(name){
   const harness=prof.harness||info.adapter||"—";
   const model=prof.model||"—";
   const role=prof.role||"";
+  const level=prof.level||"";
   const skills=Array.isArray(prof.skills)?prof.skills:[];
   const ctx=prof.context||"";
   const pfp=`<div class="pfp" style="background:${col};color:${ink}"><img src="avatars/${encodeURIComponent(name)}.png" alt="" onerror="this.remove()">${initials(name)}</div>`;
-  const chips=[harness!=="—"?`<span class="chip">${esc(harness)}</span>`:"",model!=="—"?`<span class="chip">${esc(model)}</span>`:"",ctx?`<span class="chip">${esc(ctx)}</span>`:""].join("");
+  const chips=[level?`<span class="chip">${esc(level)}</span>`:"",harness!=="—"?`<span class="chip">${esc(harness)}</span>`:"",model!=="—"?`<span class="chip">${esc(model)}</span>`:"",ctx?`<span class="chip">${esc(ctx)}</span>`:""].join("");
   const full=`<div class="full">`+
     (role?`<div class="sec"><h4>Role</h4>${esc(role)}</div>`:"")+
     (prof.persona?`<div class="sec"><h4>Persona</h4><div class="persona">${esc(prof.persona)}</div></div>`:"")+
