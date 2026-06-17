@@ -172,11 +172,13 @@ poll_once() {
   # giving the highest block ordinal seen (the new cursor). All in one python3
   # pass so the loop body stays cheap.
   local out
-  out="$(SEEN="$(cat "$SEEN_FILE" 2>/dev/null || echo 0)" python3 - "$NAME" <<'PY' <<<"$body"
+  out="$(SEEN="$(cat "$SEEN_FILE" 2>/dev/null || echo 0)" PADBODY="$body" python3 - "$NAME" <<'PY'
 import sys, os, re, json
 
 name = sys.argv[1]
-raw = sys.stdin.read()
+# pad body comes via env, NOT stdin: stdin is the heredoc PROGRAM, so a piped/<<< body
+# would collide with it (the classic `python3 - <<EOF` + pipe stdin-shadow bug).
+raw = os.environ.get("PADBODY", "")
 
 # /pad may be a JSON envelope or bare markdown. Try JSON; fall back to raw.
 md = raw
@@ -279,11 +281,11 @@ if [ ! -f "$SEEN_FILE" ]; then
   # the whole backlog — larry's gate); we retry, then give up cleanly if truly down.
   seed=""
   for _try in 1 2 3 4 5; do
-  seed="$(curl -sS --max-time 20 -H "authorization: Bearer $TOKEN" \
-            "$RELAY/pad?pad=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$PAD")" 2>>"$LOG" \
-          | python3 - <<'PY'
-import sys, re, json
-raw = sys.stdin.read()
+  _seedbody="$(curl -sS --max-time 20 -H "authorization: Bearer $TOKEN" \
+            "$RELAY/pad?pad=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$PAD")" 2>>"$LOG")"
+  seed="$(PADBODY="$_seedbody" python3 - <<'PY'
+import sys, os, re, json
+raw = os.environ.get("PADBODY", "")
 md = raw
 s = raw.lstrip()
 if s[:1] in "{[":
