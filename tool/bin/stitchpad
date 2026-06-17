@@ -705,7 +705,15 @@ PY
       tmpmd="$(mktemp)"; trap 'rm -f "$tmpmd"' EXIT
       relay_resp="$(curl -sf -H "Authorization: Bearer ${token}" "${relay}/pad?pad=${pad}" 2>/dev/null || true)"
       [ -z "$relay_resp" ] && exit 0
-      echo "$relay_resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('md',''))" 2>/dev/null > "$tmpmd"
+      # /pad returns {pad: "<markdown>", roster, ...} (key is "pad", not "md") OR,
+      # on some paths, raw markdown. Tolerate all three so the wake never silently
+      # gets an empty pad: try "pad", then "md", else treat the body as raw markdown.
+      echo "$relay_resp" | python3 -c "import json,sys
+b=sys.stdin.read()
+try:
+    d=json.loads(b); sys.stdout.write(d.get('pad') or d.get('md') or '')
+except Exception:
+    sys.stdout.write(b)" 2>/dev/null > "$tmpmd"
       [ -s "$tmpmd" ] || exit 0
       # Temporarily override PAD_MD to the downloaded relay pad so the local
       # engagement/wake machinery runs unchanged against it.
