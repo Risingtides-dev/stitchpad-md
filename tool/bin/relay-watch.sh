@@ -31,19 +31,6 @@
 #
 # Needs only: curl, python3, kitty. Crash-safe: a bad poll logs and continues.
 
-# bash 4+ required: this script embeds python heredocs inside $(...), which bash
-# 3.2 (the macOS default /bin/bash) mis-parses (backtick/quote tracking inside a
-# $()-nested heredoc → "unexpected EOF"). Stock-macOS coworkers hit a silent
-# no-wake otherwise (henry's find). Re-exec under a modern bash if we're on 3.x.
-if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
-  for _b in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash 2>/dev/null)"; do
-    if [ -x "$_b" ] && "$_b" -c '[ "${BASH_VERSINFO[0]}" -ge 4 ]' 2>/dev/null; then
-      exec "$_b" "$0" "$@"
-    fi
-  done
-  echo "relay-watch: needs bash 4+ (macOS ships 3.2). Install one: brew install bash" >&2
-  exit 1
-fi
 set -uo pipefail
 
 # ── config ───────────────────────────────────────────────────────────
@@ -76,6 +63,78 @@ LOG="$STATE_DIR/relay-watch.$KEY.log"
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 log() { echo "[$(ts)] $*" >>"$LOG"; }
 
+# ── Python helpers as EXTERNAL files (bash-3.2-safe) ─────────────────
+# macOS ships bash 3.2, which CANNOT parse a heredoc nested inside $(...) — it
+# dies "unexpected EOF / token (", a silent no-wake (henry caught it live). So we
+# write the two python programs to temp files ONCE and invoke them normally. No
+# heredoc-in-command-substitution anywhere → parses on 3.2 and 4+ alike.
+PARSER_PY="$STATE_DIR/relay-watch.$KEY.parser.py"
+SEED_PY="$STATE_DIR/relay-watch.$KEY.seed.py"
+cat > "$PARSER_PY" <<'PY'
+import sys, os, re, json
+name = sys.argv[1]
+raw = os.environ.get("PADBODY", "")
+md = raw
+s = raw.lstrip()
+if s[:1] in "{[":
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict) and isinstance(obj.get("pad"), str):
+            md = obj["pad"]
+    except Exception:
+        md = raw
+try:
+    seen = int(os.environ.get("SEEN", "0"))
+except ValueError:
+    seen = 0
+low = name.lower()
+mention = re.compile(r'(^|[^a-z0-9_-])@' + re.escape(low) + r'([^a-z0-9_-]|$)')
+header = re.compile(r'^##\s+@?([A-Za-z0-9_-]+)')
+blocks = []
+cur_author, cur_lines, started = None, [], False
+for line in md.splitlines():
+    m = header.match(line)
+    if m:
+        if started:
+            blocks.append((cur_author, "\n".join(cur_lines)))
+        cur_author = m.group(1).lower()
+        cur_lines = []
+        started = True
+    elif started:
+        cur_lines.append(line)
+if started:
+    blocks.append((cur_author, "\n".join(cur_lines)))
+maxord = len(blocks)
+for i, (author, text) in enumerate(blocks, start=1):
+    if i <= seen: continue
+    if author == low: continue
+    if not mention.search(text.lower()): continue
+    first = next((l for l in text.splitlines() if l.strip()), "")
+    if first.strip().startswith(".") or first.strip().lower().startswith("[ack]"): continue
+    _bad = set('\r\n\\' + chr(96) + chr(34) + chr(39))
+    snip = ''.join(c for c in first if c not in _bad)
+    snip = re.sub(r'\s+', ' ', snip).strip()[:120]
+    print(f"{i}\t{author}\t{snip}")
+print(f"MAX {maxord}")
+PY
+cat > "$SEED_PY" <<'PY'
+import os, re, json
+raw = os.environ.get("PADBODY", "")
+md = raw
+s = raw.lstrip()
+if s[:1] in "{[":
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict) and isinstance(obj.get("pad"), str):
+            md = obj["pad"]
+    except Exception:
+        md = raw
+if not raw.strip():
+    print(-1)
+else:
+    print(sum(1 for l in md.splitlines() if re.match(r'^##\s+@?[A-Za-z0-9_-]+', l)))
+PY
+
 # SINGLE-INSTANCE: a second poller for the same relay+pad+name would DOUBLE-inject
 # wakes (larry's gate). mkdir is atomic on every POSIX fs — first one wins, dupes
 # exit cleanly. Stale lock (dead pid) is reclaimed. Released on exit.
@@ -94,6 +153,87 @@ trap 'rm -rf "$LOCK_DIR" 2>/dev/null; log "relay-watch exiting (cleanup)"' EXIT
 
 echo "relay-watch: polling $RELAY/pad?pad=$PAD as @$NAME every ${INTERVAL}s (log: $LOG)"
 log "start poll pad=$PAD name=$NAME interval=${INTERVAL}s lock=$LOCK_DIR"
+
+# Parser helper. Keep Python out of heredocs nested inside command substitution:
+# macOS /bin/bash 3.2 mis-parses that pattern before any version guard can run.
+PARSER_PY="$STATE_DIR/relay-watch.$KEY.parser.py"
+cat > "$PARSER_PY" <<'PY'
+import json
+import os
+import re
+import sys
+
+def markdown_from_env():
+    raw = os.environ.get("PADBODY", "")
+    md = raw
+    s = raw.lstrip()
+    if s[:1] in "{[":
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, dict) and isinstance(obj.get("pad"), str):
+                md = obj["pad"]
+        except Exception:
+            md = raw
+    return raw, md
+
+def blocks_from_markdown(md):
+    header = re.compile(r'^##\s+@?([A-Za-z0-9_-]+)')
+    blocks = []
+    cur_author, cur_lines, started = None, [], False
+    for line in md.splitlines():
+        m = header.match(line)
+        if m:
+            if started:
+                blocks.append((cur_author, "\n".join(cur_lines)))
+            cur_author = m.group(1).lower()
+            cur_lines = []
+            started = True
+        elif started:
+            cur_lines.append(line)
+    if started:
+        blocks.append((cur_author, "\n".join(cur_lines)))
+    return blocks
+
+mode = sys.argv[1] if len(sys.argv) > 1 else ""
+raw, md = markdown_from_env()
+
+if mode == "count":
+    if not raw.strip():
+        print(-1)
+    else:
+        print(len(blocks_from_markdown(md)))
+    raise SystemExit
+
+if mode != "mentions" or len(sys.argv) < 3:
+    raise SystemExit(2)
+
+name = sys.argv[2]
+try:
+    seen = int(os.environ.get("SEEN", "0"))
+except ValueError:
+    seen = 0
+
+low = name.lower()
+mention = re.compile(r'(^|[^a-z0-9_-])@' + re.escape(low) + r'([^a-z0-9_-]|$)')
+blocks = blocks_from_markdown(md)
+
+for i, (author, text) in enumerate(blocks, start=1):
+    if i <= seen:
+        continue
+    if author == low:
+        continue
+    if not mention.search(text.lower()):
+        continue
+    first = next((l for l in text.splitlines() if l.strip()), "")
+    stripped = first.strip()
+    if stripped.startswith(".") or stripped.lower().startswith("[ack]"):
+        continue
+    bad = set("\r\n\\" + chr(96) + chr(34) + chr(39))
+    snip = "".join(c for c in first if c not in bad)
+    snip = re.sub(r"\s+", " ", snip).strip()[:120]
+    print("%s\t%s\t%s" % (i, author, snip))
+print("MAX %s" % len(blocks))
+PY
 
 # ── kitty target resolution ──────────────────────────────────────────
 # Resolve (socket, window) for MY kitty window. Prefer the captured env; else
@@ -186,77 +326,12 @@ poll_once() {
   # giving the highest block ordinal seen (the new cursor). All in one python3
   # pass so the loop body stays cheap.
   local out
-  out="$(SEEN="$(cat "$SEEN_FILE" 2>/dev/null || echo 0)" PADBODY="$body" python3 - "$NAME" <<'PY'
-import sys, os, re, json
-
-name = sys.argv[1]
-# pad body comes via env, NOT stdin: stdin is the heredoc PROGRAM, so a piped/<<< body
-# would collide with it (the classic `python3 - <<EOF` + pipe stdin-shadow bug).
-raw = os.environ.get("PADBODY", "")
-
-# /pad may be a JSON envelope or bare markdown. Try JSON; fall back to raw.
-md = raw
-s = raw.lstrip()
-if s[:1] in "{[":
-    try:
-        obj = json.loads(raw)
-        if isinstance(obj, dict) and isinstance(obj.get("pad"), str):
-            md = obj["pad"]
-    except Exception:
-        md = raw
-
-try:
-    seen = int(os.environ.get("SEEN", "0"))
-except ValueError:
-    seen = 0
-
-low = name.lower()
-mention = re.compile(r'(^|[^a-z0-9_-])@' + re.escape(low) + r'([^a-z0-9_-]|$)')
-header = re.compile(r'^##\s+@?([A-Za-z0-9_-]+)')   # "## @author · 12:30" → author
-
-# Split the pad into blocks; each "## " header starts a new block. Block ordinal
-# is its 1-based position in document order — stable across polls as long as no
-# one rewrites history, which stitchpad's append-only pad doesn't.
-blocks = []           # list of (author_lower, text)
-cur_author, cur_lines, started = None, [], False
-for line in md.splitlines():
-    m = header.match(line)
-    if m:
-        if started:
-            blocks.append((cur_author, "\n".join(cur_lines)))
-        cur_author = m.group(1).lower()
-        cur_lines = []
-        started = True
-    elif started:
-        cur_lines.append(line)
-if started:
-    blocks.append((cur_author, "\n".join(cur_lines)))
-
-maxord = len(blocks)
-for i, (author, text) in enumerate(blocks, start=1):
-    if i <= seen:
-        continue                          # already processed this block
-    if author == low:
-        continue                          # my own block never wakes me
-    if not mention.search(text.lower()):
-        continue                          # doesn't @ me
-    # Silent-ack convention (matches lib.sh): a block whose first content line
-    # starts with "." or "[ack]" is invisible to the wake gate.
-    first = next((l for l in text.splitlines() if l.strip()), "")
-    if first.strip().startswith(".") or first.strip().lower().startswith("[ack]"):
-        continue
-    # Strip chars that break the kitty send-text nudge. Build the set with chr()
-    # so no literal backtick or quote appears in this heredoc: bash 3.2 (macOS
-    # default) mis-parses a backtick inside a dollar-paren-nested heredoc as a
-    # command substitution and dies with unexpected-EOF, causing a silent no-wake.
-    # (henry caught this from a real stock-macOS connect.)
-    _bad = set('\r\n\\' + chr(96) + chr(34) + chr(39))   # backtick, dquote, squote
-    snip = ''.join(c for c in first if c not in _bad)
-    snip = re.sub(r'\s+', ' ', snip).strip()[:120]
-    print(f"{i}\t{author}\t{snip}")
-print(f"MAX {maxord}")
-PY
-)" || { log "pad parse failed — continuing"; return 0; }
+  # Call the parser via an EXTERNAL temp file, NOT a heredoc-in-$(). bash 3.2 (the
+  # macOS default) cannot parse a heredoc nested inside command substitution — it
+  # mis-reads it and dies with "unexpected EOF / token (", a SILENT no-wake on
+  # stock Macs (henry caught this live). External-file invocation is 3.2-safe.
+  out="$(SEEN="$(cat "$SEEN_FILE" 2>/dev/null || echo 0)" PADBODY="$body" python3 "$PARSER_PY" mentions "$NAME")" \
+    || { log "pad parse failed — continuing"; return 0; }
 
   # Walk the parser output. Fire a wake per new unanswered mention. Advance the
   # cursor to MAX — UNLESS a wake DEFERRED (focus-guard), in which case we hold
@@ -303,26 +378,7 @@ if [ ! -f "$SEEN_FILE" ]; then
   for _try in 1 2 3 4 5; do
   _seedbody="$(curl -sS --max-time 20 -H "authorization: Bearer $TOKEN" \
             "$RELAY/pad?pad=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$PAD")" 2>>"$LOG")"
-  seed="$(PADBODY="$_seedbody" python3 - <<'PY'
-import sys, os, re, json
-raw = os.environ.get("PADBODY", "")
-md = raw
-s = raw.lstrip()
-if s[:1] in "{[":
-    try:
-        obj = json.loads(raw)
-        if isinstance(obj, dict) and isinstance(obj.get("pad"), str):
-            md = obj["pad"]
-    except Exception:
-        md = raw
-# empty stdin = fetch FAILED → print -1 (sentinel) so we DON'T seed to 0 and
-# flood-wake the whole backlog. A genuinely empty pad still has >=0 real blocks.
-if not raw.strip():
-    print(-1)
-else:
-    print(sum(1 for l in md.splitlines() if re.match(r'^##\s+@?[A-Za-z0-9_-]+', l)))
-PY
-)"
+  seed="$(PADBODY="$_seedbody" python3 "$SEED_PY")"
     [ -n "$seed" ] && [ "$seed" != "-1" ] && break
     log "seed attempt $_try failed — retrying in 3s"
     sleep 3
