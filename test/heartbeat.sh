@@ -13,7 +13,13 @@ cd "$FIXTURE_DIR"
 export STITCHPAD_NAME="alice"
 export STITCHPAD_SESSION="session-test"
 export KITTY_WINDOW_ID="42"
+export KITTY_LISTEN_ON=""
+export KITTY_SOCKET=""
 export STITCHPAD_HEARTBEAT_INTERVAL="1"
+# Pin the ticker parent to this test shell. Under harnessed/non-interactive runs,
+# relying on the stitchpad subprocess PPID can point at a transient wrapper and
+# make the ticker exit before the mtime refresh assertion.
+export STITCHPAD_HEARTBEAT_PARENT_PID="$$"
 
 "$SP" heartbeat start >/dev/null
 

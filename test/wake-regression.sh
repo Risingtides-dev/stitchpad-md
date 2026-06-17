@@ -97,4 +97,21 @@ STITCHPAD_NAME=dale "$SP" say 'dale @larry inline ping' >/dev/null
 inline="$(STITCHPAD_NAME=larry "$SP" wake --peek)"
 contains "$inline" 'dale @larry inline ping' || fail 'inline @mention did not wake larry'
 
+# Regression 5: compact wake nudges must name the sender, not the recipient.
+# Otherwise the nudge says "NEW from @larry ... reply with @larry" for a ping
+# sent by @tester, and agents reply to themselves.
+case5="$tmp/case5"
+mkdir "$case5"
+cd "$case5"
+"$SP" init --name case5 >/dev/null
+"$SP" join larry codex >/dev/null
+stop_watcher "$case5"
+STITCHPAD_NAME=tester "$SP" say '@larry sender header ping' >/dev/null
+sender_line="$("$SP" wake larry --peek)"
+contains "$sender_line" 'NEW from @tester' || fail 'wake nudge did not name sender'
+contains "$sender_line" 'reply with @tester' || fail 'wake nudge did not route reply to sender'
+if contains "$sender_line" 'NEW from @larry'; then
+  fail 'wake nudge incorrectly named recipient as sender'
+fi
+
 printf 'wake regression ok\n'
