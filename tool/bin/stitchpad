@@ -66,7 +66,7 @@ EOF
     # Self-sufficient from creation: start this pad's wake watcher now so it's live
     # the moment it exists (pinned to this pad regardless of cwd). join also ensures
     # it; this just means a fresh pad is ready before the first agent even joins.
-    STITCHPAD_PAD_DIR="$dir" "$STITCHPAD_HOME/bin/daemon.sh" start >/dev/null 2>&1 \
+    STITCHPAD_PAD_DIR="$dir" ensure_watcher 2>/dev/null \
       && echo "✓ wake watcher started for #$name"
     ;;
 
@@ -101,13 +101,14 @@ EOF
     fi
     # House rule for EVERY member: closeouts are silent (prevents wake ping-pong).
     echo "── house rule: to acknowledge/wind down, start the line with \".\" (e.g. \".ack ok\") — never @-reply a goodbye; an @-mention wakes that agent. ──"
-    # AUTO-WATCHER: joining a pad should make wakes work out of the box. Ensure THIS
-    # pad's watcher is running (idempotent — daemon.sh no-ops if already up). Pinned
-    # to this pad via PAD_DIR so it watches the right stitchpad.md, not $PWD's.
-    if ! (STITCHPAD_PAD_DIR="$PAD_DIR" "$STITCHPAD_HOME/bin/daemon.sh" status 2>/dev/null | grep -q running); then
-      STITCHPAD_PAD_DIR="$PAD_DIR" "$STITCHPAD_HOME/bin/daemon.sh" start >/dev/null 2>&1 \
-        && echo "── wake watcher started for this pad ──"
-    fi
+    # KEEP-ALIVE + AUTO-WATCHER: joining a pad starts a per-agent heartbeat
+    # ticker. Watchers consume .state/alive.<name>; Stop hooks only supplement it.
+    STITCHPAD_NAME="$who" STITCHPAD_HEARTBEAT_PARENT_PID="${STITCHPAD_HEARTBEAT_PARENT_PID:-$PPID}" \
+      "$BIN_DIR/stitchpad" heartbeat start "$who" >/dev/null 2>&1 \
+      && echo "── heartbeat started for @$who ──"
+    # Ensure watcher singleton is running (idempotent — ensure_watcher no-ops if up).
+    STITCHPAD_PAD_DIR="$PAD_DIR" ensure_watcher 2>/dev/null \
+      && echo "── wake watcher started for this pad ──"
     ;;
 
   clear)
@@ -153,11 +154,13 @@ EOF
     done
     sp_unlock
     echo "✓ $who left"
-    # AUTO-WATCHER: stop this pad's watcher once the roster is empty — no members,
-    # nothing to wake. (Counts non-operator roster lines.)
+    # KEEP-ALIVE: stop this agent's heartbeat ticker so the watcher can self-stop
+    # once all remaining agents go stale.
+    STITCHPAD_NAME="$who" "$BIN_DIR/stitchpad" heartbeat --stop "$who" >/dev/null 2>&1 || true
+    # AUTO-WATCHER: stop watcher if roster is empty (no members = no heartbeats).
     _remaining="$(sp_roster | grep -cv '^[[:space:]]*$' 2>/dev/null || echo 0)"
     if [ "${_remaining:-0}" -le 0 ]; then
-      STITCHPAD_PAD_DIR="$PAD_DIR" "$STITCHPAD_HOME/bin/daemon.sh" stop >/dev/null 2>&1 \
+      rm -rf "$PAD_STATE/watch.lock.d" 2>/dev/null \
         && echo "── last member left — wake watcher stopped ──"
     fi
     ;;
@@ -215,6 +218,9 @@ EOF
           && echo "✓ window color for @$nm → $_bg"
       fi
     fi
+    STITCHPAD_NAME="$nm" STITCHPAD_HEARTBEAT_PARENT_PID="${STITCHPAD_HEARTBEAT_PARENT_PID:-$PPID}" \
+      "$BIN_DIR/stitchpad" heartbeat start "$nm" >/dev/null 2>&1 \
+      && echo "✓ heartbeat for @$nm"
     ;;
 
   say)
@@ -388,6 +394,141 @@ EOF
     exit 0
     ;;
 
+  heartbeat)
+    # Per-agent terminal keep-alive.
+    #   stitchpad heartbeat start [name]   start/refresh bg ticker
+    #   stitchpad heartbeat --touch [name] [pid]   one-shot touch (Stop hook backup)
+    #   stitchpad heartbeat --stop [name]  stop ticker + remove alive file
+    # The ticker writes .state/alive.<name> JSON every N seconds. Consumers treat
+    # ONLINE as: alive file mtime <90s AND kill -0 .pid succeeds.
+    sp_init_paths || exit 1
+    sub="${1:-start}"; shift || true
+
+    heartbeat_write() {
+      local who="$1" pid="$2" parent="$3" session="$4" kitty_window="$5" target="$6"
+      local alive="$PAD_STATE/alive.$who" tmp="$PAD_STATE/.alive.$who.$$"
+      python3 - "$who" "$pid" "$parent" "$session" "$kitty_window" "$target" > "$tmp" <<'PY'
+import json, sys, time
+name, pid, parent, session, kitty_window, target = sys.argv[1:7]
+def num(v):
+    try:
+        return int(v)
+    except Exception:
+        return 0
+print(json.dumps({
+    "name": name,
+    "ts": int(time.time()),
+    "pid": num(pid),
+    "parentPid": num(parent),
+    "session": session,
+    "kittyWindow": kitty_window,
+    "target": target,
+}, separators=(",", ":")))
+PY
+      mv "$tmp" "$alive"
+    }
+
+    heartbeat_existing_pid() {
+      local who="$1" alive="$PAD_STATE/alive.$who" pid=""
+      [ -f "$alive" ] || return 1
+      pid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("pid",""))' "$alive" 2>/dev/null || true)"
+      [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
+      printf '%s\n' "$pid"
+    }
+
+    heartbeat_kitty_alive() {
+      local sock="$1" win="$2"
+      [ -n "$sock" ] && [ -n "$win" ] || return 0
+      command -v kitty >/dev/null 2>&1 || return 0
+      kitty @ --to "$sock" ls 2>/dev/null | grep -q "\"id\"[[:space:]]*:[[:space:]]*$win\\>"
+    }
+
+    case "$sub" in
+      start)
+        who="${1:-$(sp_me)}"
+        [ -n "$who" ] || { echo "stitchpad: no identity" >&2; exit 2; }
+        export STITCHPAD_NAME="$who"
+        interval="${STITCHPAD_HEARTBEAT_INTERVAL:-30}"
+        lockd="$PAD_STATE/heartbeat.$who.lock"
+        mkdir -p "$PAD_STATE"
+        if [ -d "$lockd" ]; then
+          oldpid="$(cat "$lockd/pid" 2>/dev/null || true)"
+          if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
+            "$BIN_DIR/stitchpad" heartbeat --touch "$who" "$oldpid" >/dev/null 2>&1 || true
+            echo "heartbeat already running for @$who (pid $oldpid)"
+            exit 0
+          fi
+          rm -rf "$lockd"
+        fi
+        if ! mkdir "$lockd" 2>/dev/null; then
+          oldpid="$(cat "$lockd/pid" 2>/dev/null || true)"
+          [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null && { echo "heartbeat already running for @$who (pid $oldpid)"; exit 0; }
+          rm -rf "$lockd"; mkdir "$lockd" 2>/dev/null || exit 1
+        fi
+        parent="${STITCHPAD_HEARTBEAT_PARENT_PID:-$PPID}"
+        session="${STITCHPAD_SESSION:-}"
+        kitty_window="${KITTY_WINDOW_ID:-}"
+        kitty_sock="${KITTY_LISTEN_ON:-${KITTY_SOCKET:-}}"
+        target="${kitty_sock:+$kitty_sock@@$kitty_window}"
+        (
+          ticker_pid="$BASHPID"
+          echo "$ticker_pid" > "$lockd/pid"
+          trap 'rm -rf "$lockd"; rm -f "$PAD_STATE/alive.$STITCHPAD_NAME"' EXIT INT TERM
+          while :; do
+            heartbeat_write "$STITCHPAD_NAME" "$ticker_pid" "$parent" "$session" "$kitty_window" "$target"
+            "$BIN_DIR/stitchpad" ensure-watcher >/dev/null 2>&1 || true
+            sleep "$interval" &
+            wait $! || exit 0
+            [ -n "$parent" ] && ! kill -0 "$parent" 2>/dev/null && exit 0
+            heartbeat_kitty_alive "$kitty_sock" "$kitty_window" || exit 0
+          done
+        ) &
+        disown
+        echo "heartbeat started for @$who"
+        ;;
+      --touch|touch)
+        who="${1:-$(sp_me)}"; shift || true
+        [ -n "$who" ] || exit 0
+        pid="${1:-}"
+        if [ -z "$pid" ]; then
+          pid="$(heartbeat_existing_pid "$who" 2>/dev/null || true)"
+        fi
+        [ -n "$pid" ] || pid="$BASHPID"
+        heartbeat_write "$who" "$pid" "${STITCHPAD_HEARTBEAT_PARENT_PID:-$PPID}" "${STITCHPAD_SESSION:-}" "${KITTY_WINDOW_ID:-}" "${KITTY_LISTEN_ON:-${KITTY_SOCKET:-}}"
+        ;;
+      --stop|stop)
+        who="${1:-$(sp_me)}"
+        [ -n "$who" ] || exit 0
+        lockd="$PAD_STATE/heartbeat.$who.lock"
+        pid="$(cat "$lockd/pid" 2>/dev/null || true)"
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+        if [ -n "$pid" ]; then
+          for _i in 1 2 3 4 5 6 7 8 9 10; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+          done
+          kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+        fi
+        rm -rf "$lockd"
+        rm -f "$PAD_STATE/alive.$who"
+        echo "heartbeat stopped for @$who"
+        ;;
+      *)
+        echo "usage: stitchpad heartbeat {start|--touch|--stop} [name]" >&2
+        exit 1
+        ;;
+    esac
+    exit 0
+    ;;
+
+  ensure-watcher)
+    # Ensure the watcher singleton is running. Idempotent: no-ops if a watcher
+    # already holds the lock or no agents have fresh heartbeats.
+    sp_init_paths || exit 1
+    ensure_watcher
+    exit 0
+    ;;
+
   meta)
     # Runtime/model metadata used by TUI clients.
     #   stitchpad meta set <name> <runtime|harness|model> <value...>
@@ -540,8 +681,12 @@ EOF
     printf '{"decision":"block","reason":%s}\n' "$esc"
     ;;
 
+  start)  sp_init_paths || exit 1; ensure_watcher; echo "→ watcher ensured"; ;;
+  stop)   sp_init_paths || exit 1; rm -rf "$PAD_STATE/watch.lock.d" 2>/dev/null; echo "→ watcher stopped"; ;;
+  status) sp_init_paths || exit 1; sp_watcher_alive && echo "running (pid $(cat "$PAD_STATE/watch.lock.d/pid" 2>/dev/null))" || echo "stopped"; ;;
+  restart) sp_init_paths || exit 1; rm -rf "$PAD_STATE/watch.lock.d" 2>/dev/null; ensure_watcher; echo "→ watcher restarted"; ;;
   watch)   exec "$STITCHPAD_HOME/bin/watch.sh" ;;
-  start|stop|status|restart) exec "$STITCHPAD_HOME/bin/daemon.sh" "$cmd" ;;
+  daemon)  exec "$STITCHPAD_HOME/bin/daemon.sh" "${@}" ;;
 
   bridge)
     # The relay bridge as a permanent login service — so EVERY pad anywhere under

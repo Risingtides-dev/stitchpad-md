@@ -262,3 +262,63 @@ sp_notify() {
     osascript -e "display notification \"${msg//\"/\\\"}\" with title \"${title//\"/\\\"}\" sound name \"$sound\"" 2>/dev/null || true
   fi
 }
+
+# ── Watcher lifecycle (singleton) ────────────────────────────────────
+# ensure_watcher: called on every stitchpad subcommand exit. Spawns the pad
+# watcher (watch.sh) iff (a) any agent heartbeat is fresh AND (b) no watcher
+# already holds the singleton lock. Uses mkdir-atomic to guarantee exactly one
+# watcher per pad — same pattern as sp_lock() and claims.
+#
+# Heartbeat freshness: .state/alive.<name> mtime < 90s AND kill -0 pid succeeds.
+# Self-exit: watch.sh polls heartbeats and removes the lock + exits when ALL
+# heartbeats are stale (all agents' terminals closed).
+# Has any agent posted a fresh heartbeat recently?
+sp_any_alive() {
+  local now alive heart file pid ts
+  now=$(date +%s)
+  for heart in "$PAD_STATE"/alive.*; do
+    [ -f "$heart" ] || continue
+    ts=$(stat -f %m "$heart" 2>/dev/null || stat -c %Y "$heart" 2>/dev/null || echo 0)
+    [ $(( now - ts )) -lt 90 ] || continue
+    pid=$(grep -o '"pid":[0-9]*' "$heart" 2>/dev/null | head -1 | cut -d: -f2)
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+# Is the watcher running? (lock dir exists AND PID alive)
+sp_watcher_alive() {
+  local watch_lock="$PAD_STATE/watch.lock.d"
+  [ -d "$watch_lock" ] || return 1
+  local p; p="$(cat "$watch_lock/pid" 2>/dev/null)"
+  [ -n "$p" ] && kill -0 "$p" 2>/dev/null && return 0
+  # Stale lock — PID dead. Clean it so we can re-acquire.
+  rm -rf "$watch_lock" 2>/dev/null || true
+  return 1
+}
+
+ensure_watcher() {
+  [ -n "${PAD_DIR:-}" ] || sp_init_paths || return 0
+  local watch_lock="$PAD_STATE/watch.lock.d"
+  local watch_log="$PAD_STATE/watch.log"
+  # Only spawn if someone is alive and listening
+  sp_any_alive || return 0
+  # Already running? Nothing to do.
+  sp_watcher_alive && return 0
+  # ATOMIC acquire: exactly one caller wins.
+  if ! mkdir "$watch_lock" 2>/dev/null; then
+    # Lost the race. Brief sleep lets winner write its PID, then re-check.
+    sleep 0.3
+    sp_watcher_alive && return 0
+    # Stale lock. Clean and retry once.
+    rm -rf "$watch_lock" 2>/dev/null || true
+    mkdir "$watch_lock" 2>/dev/null || return 0
+  fi
+  # Spawn the watcher and record ITS pid immediately so losers see us.
+  ( trap 'rm -rf "$watch_lock"' EXIT
+    STITCHPAD_PAD_DIR="$PAD_DIR" bash "$STITCHPAD_HOME/bin/watch.sh" >>"$watch_log" 2>&1
+  ) &
+  echo $! > "$watch_lock/pid"
+  disown
+  return 0
+}
