@@ -90,6 +90,8 @@ html,body{margin:0;height:100%;font:15px/1.46 -apple-system,system-ui,"Segoe UI"
 .sys{color:var(--dim);font-style:italic;font-size:13px;padding:4px 16px}
 .row.pending{opacity:.55}.row.pending .ts{font-style:italic}
 #cwrap{padding:8px 16px;padding-bottom:calc(8px + env(safe-area-inset-bottom))}
+#newpill{position:absolute;left:50%;transform:translateX(-50%);bottom:100%;margin-bottom:8px;background:var(--accent);color:#fff;border:0;border-radius:16px;padding:6px 14px;font:13px inherit;font-weight:700;box-shadow:0 4px 16px rgba(0,0,0,.4);cursor:pointer;display:none;z-index:21}
+#newpill.show{display:block}
 #composer{border:1px solid #565a60;border-radius:10px;background:#222529;display:flex;align-items:flex-end}
 #composer textarea{flex:1;background:transparent;border:0;color:var(--txt);font:15px/1.4 inherit;padding:12px;resize:none;max-height:120px;outline:none}
 #composer button{background:var(--accent);color:#fff;border:0;border-radius:8px;margin:6px;padding:8px 14px;font-weight:700}
@@ -132,7 +134,7 @@ html,body{margin:0;height:100%;font:15px/1.46 -apple-system,system-ui,"Segoe UI"
     <div id="statusbar"></div>
     <div id="claimbar"></div>
     <div id="log"></div>
-    <div id="cwrap"><div id="ac"></div><div id="composer"><textarea id="text" rows="1" placeholder="Message…"></textarea><button id="send">➤</button></div><div class="tags" id="tags">you are @smaths · type @name to address agents</div></div>
+    <div id="cwrap"><button id="newpill">↓ new messages</button><div id="ac"></div><div id="composer"><textarea id="text" rows="1" placeholder="Message…"></textarea><button id="send">➤</button></div><div class="tags" id="tags">you are @smaths · type @name to address agents</div></div>
   </div>
 </div>
 <div id="cardback"></div>
@@ -180,8 +182,20 @@ function fmt(t){
   // Must run BEFORE the autolink so the url inside ()s isn't turned into an <a> first.
   // ponytail: remote-img beacon (viewer IP) accepted for v0; relay-proxy /img?u= later.
   t=t.replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g,(m,alt,url)=>`<img class="msg-img" src="${url}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">`);
+  // bare media URL → inline player. Matches a standalone http(s) link ending in a known
+  // a/v extension (ignoring a ?query) so tg-media video/audio sends actually PLAY here
+  // instead of rendering as a click-out link. Runs BEFORE autolink so the url isn't
+  // wrapped in an <a> first. ext is captured from the URL itself — no HTML breakout
+  // (url is already esc()'d, and the regex only admits url-safe chars). preload=metadata
+  // so a long log of clips doesn't fetch every byte until played. ponytail: native
+  // <video>/<audio>, no player lib; relay-proxy for hotlink/CORS later if needed.
+  t=t.replace(/(^|[\s])(https?:\/\/[^\s]+?\.(mp4|mov|webm|m4v))(\?[^\s]*)?(?=[\s]|$)/gi,(m,p,url,ext,q)=>`${p}<video class="msg-img" src="${url}${q||""}" controls preload="metadata" playsinline></video>`);
+  t=t.replace(/(^|[\s])(https?:\/\/[^\s]+?\.(mp3|m4a|ogg|oga|wav))(\?[^\s]*)?(?=[\s]|$)/gi,(m,p,url,ext,q)=>`${p}<audio src="${url}${q||""}" controls preload="metadata" style="max-width:min(360px,100%);margin:6px 0;display:block"></audio>`);
   t=t.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');
-  t=t.replace(/(https?:\/\/[^\s]+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>');
+  // autolink — but NOT a URL already inside a tag attribute (preceded by =") , else
+  // the src="…" of an <img>/<video>/<audio> we just emitted gets wrapped in an <a>
+  // and the tag breaks. The (?<!=") lookbehind skips those; bare URLs still link.
+  t=t.replace(/(?<!=")(https?:\/\/[^\s"]+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>');
   t=t.replace(/(^|[\s(])@([a-zA-Z0-9_-]+)/g,(m,p,n)=>`${p}<b style="color:${colorFor(n)}">@${n}</b>`);
   return t;
 }
@@ -191,7 +205,7 @@ async function loadPads(){
   if(!pad&&pads[0])pad=pads[0].name;
   pads.forEach(p=>{const d=document.createElement("div");d.className="chan"+(p.name===pad?" on":"");
     d.innerHTML=`<span class="h">#</span>${esc(p.name)}`;
-    d.onclick=()=>{pad=p.name;dmWith="";PAD_ETAG="";localStorage.removeItem("sp_dm");localStorage.setItem("sp_pad",pad);document.getElementById("chans").classList.remove("open");render();loadPads();};
+    d.onclick=()=>{pad=p.name;dmWith="";PAD_ETAG="";localStorage.removeItem("sp_dm");localStorage.setItem("sp_pad",pad);document.getElementById("chans").classList.remove("open");restoreDraft();render();loadPads();};
     cl.appendChild(d);});
 }
 function parse(md){const out=[];let cur=null;
@@ -252,9 +266,19 @@ async function render(){
   // an actual content change touches the DOM now. ponytail: string-equality guard
   // beats a virtual-DOM diff for a flat append-only log; upgrade to keyed appends
   // only if message counts get huge enough that even building `html` is the cost.
-  if(html!==LAST_LOG_HTML){ log.innerHTML=html; LAST_LOG_HTML=html; if(atBottom)log.scrollTop=log.scrollHeight; }
+  if(html!==LAST_LOG_HTML){ log.innerHTML=html; LAST_LOG_HTML=html;
+    // at the bottom → follow new messages. Scrolled up reading history → don't yank
+    // them down; surface a "↓ new messages" pill instead so unread isn't silent.
+    if(atBottom)log.scrollTop=log.scrollHeight; else document.getElementById("newpill").classList.add("show");
+  }
 }
 let LAST_LOG_HTML="";
+// New-message pill: tap → jump to bottom + hide. Also auto-hide when the user scrolls
+// back to the bottom on their own (no stale pill once they've caught up).
+(function(){const log=document.getElementById("log"),pill=document.getElementById("newpill");
+  pill.onclick=()=>{log.scrollTop=log.scrollHeight;pill.classList.remove("show");};
+  log.addEventListener("scroll",()=>{if(log.scrollHeight-log.scrollTop-log.clientHeight<80)pill.classList.remove("show");});
+})();
 let PAD_ETAG="";
 let ROSTER=[],FILES=[],PENDING=[],ROSTER_INFO={},PROFILES={},CLAIMS=[],dmWith="";
 // File-write claims telemetry: "✏️ @x editing <file>" — shows who holds a write
@@ -282,8 +306,8 @@ function renderDMList(){
       `${dot}${esc(n)}</div>`;
   }).join("");
 }
-function openDM(n){dmWith=n;localStorage.setItem("sp_dm",n);document.getElementById("chans").classList.remove("open");render();}
-function closeDM(){dmWith="";localStorage.removeItem("sp_dm");render();}
+function openDM(n){dmWith=n;localStorage.setItem("sp_dm",n);document.getElementById("chans").classList.remove("open");restoreDraft();render();}
+function closeDM(){dmWith="";localStorage.removeItem("sp_dm");restoreDraft();render();}
 // LIVENESS is ground truth, computed Mac-side from heartbeat freshness (mtime<90s AND
 // kill -0 pid) and pushed as PROFILES[name].online — the PWA can't kill -0 remotely.
 // Offline trumps activity: a crashed agent that posted 60s ago is still DEAD (grey).
@@ -351,11 +375,18 @@ function applyAc(){
   const pos=ac.start+ins.length;ta.setSelectionRange(pos,pos);
   closeAc();autosize();ta.focus();
 }
-ta.addEventListener("input",()=>{autosize();updateAc();});
+// Composer draft persistence: a control surface must not eat in-progress text on a
+// reload/PWA-kill. Save per-pad (so switching channels keeps each draft separate),
+// restore on load/pad-switch, clear on successful send. ponytail: localStorage, no
+// debounce — keystroke writes to localStorage are sub-ms and bounded by one composer.
+const draftKey=()=>"sp_draft_"+(dmWith?("dm:"+dmWith):pad);
+function saveDraft(){try{const v=ta.value;v?localStorage.setItem(draftKey(),v):localStorage.removeItem(draftKey());}catch(_){}}
+function restoreDraft(){try{ta.value=localStorage.getItem(draftKey())||"";autosize();}catch(_){}}
+ta.addEventListener("input",()=>{autosize();updateAc();saveDraft();});
 ta.addEventListener("click",updateAc);
 ta.addEventListener("blur",()=>setTimeout(closeAc,150));
 
-async function send(){let text=ta.value.trim();if(!text||!pad)return;ta.value="";autosize();closeAc();
+async function send(){let text=ta.value.trim();if(!text||!pad)return;ta.value="";autosize();closeAc();saveDraft();
   // in a DM, address the agent so the message lands in the 1:1 view (and wakes them)
   if(dmWith && !new RegExp("(^|[^a-z0-9_-])@"+dmWith+"([^a-z0-9_-]|$)","i").test(text)) text="@"+dmWith+" "+text;
   PENDING.push({text});                         // optimistic: show immediately
@@ -371,7 +402,7 @@ async function send(){let text=ta.value.trim();if(!text||!pad)return;ta.value=""
     setTimeout(render,400);
   }catch(err){
     PENDING=PENDING.filter(p=>p.text!==text);   // drop the optimistic bubble
-    ta.value=text; autosize();                   // restore text so the send isn't lost
+    ta.value=text; autosize(); saveDraft();      // restore text so the send isn't lost (and persist it)
     const b=document.createElement("div"); b.className="sys";
     b.style.color="#e01010"; b.textContent="⚠ send failed ("+err.message+") — your text is back in the box, press send to retry";
     log.appendChild(b); log.scrollTop=log.scrollHeight;
@@ -405,7 +436,7 @@ document.getElementById("log").addEventListener("click",e=>{
 });
 const loginEl=document.getElementById("login"),le=document.getElementById("le");
 document.getElementById("dmlist").addEventListener("click",e=>{const t=e.target.closest(".dm-item");if(t)openDM(t.dataset.dm);});
-function startApp(){loginEl.classList.remove("show");setMe(me);dmWith=localStorage.getItem("sp_dm")||"";loadPads();render();setInterval(render,3000);setInterval(loadPads,15000);}
+function startApp(){loginEl.classList.remove("show");setMe(me);dmWith=localStorage.getItem("sp_dm")||"";restoreDraft();loadPads();render();setInterval(render,3000);setInterval(loadPads,15000);}
 function setMe(name){me=name||"smaths";localStorage.setItem("sp_me",me);
   const t=document.getElementById("tags");if(t)t.textContent="you are @"+me+" · type @name to address agents";}
 async function doLogin(){const user=document.getElementById("lu").value.trim(),pass=document.getElementById("lp").value;le.textContent="";
