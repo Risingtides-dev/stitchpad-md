@@ -1478,15 +1478,14 @@ for os_win in data:
     fi
 
     _mc_pass=0; _mc_fail=0
-    _mc_green='\033[32m'; _mc_red='\033[31m'; _mc_reset='\033[0m'
+    _mc_green=$'\033[32m'; _mc_red=$'\033[31m'; _mc_reset=$'\033[0m'
 
     echo "stitchpad migration-check — verifying @$_mc_pilot"
     echo ""
 
     # Gate 1: doctor confirms supacode target
     echo -n "  [1/4] supacode target .......... "
-    _mc_doctor_out
-    doctor_out="$("$0" doctor --json 2>/dev/null || true)"
+    _mc_doctor_out="$("$0" doctor --json 2>/dev/null || true)"
     if echo "$_mc_doctor_out" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
@@ -1501,10 +1500,10 @@ print('FAIL')
 sys.exit(1)
 " 2>/dev/null; then
       echo "${_mc_green}PASS${_mc_reset} — supacode target validated"
-      (( pass++ ))
+      (( _mc_pass++ ))
     else
       echo "${_mc_red}FAIL${_mc_reset} — not supacode or no target"
-      (( fail++ ))
+      (( _mc_fail++ ))
     fi
 
     # Gate 2: recent heartbeat from supacode
@@ -1516,18 +1515,18 @@ sys.exit(1)
         _mc_alive_pid="$(python3 -c "import json; print(json.load(open('$_mc_alive_file')).get('pid',''))" 2>/dev/null || true)"
         if [ -n "$_mc_alive_pid" ] && kill -0 "$_mc_alive_pid" 2>/dev/null; then
           echo "${_mc_green}PASS${_mc_reset} — heartbeat $(printf '%ds' "$_mc_alive_age") ago, pid $_mc_alive_pid alive"
-          (( pass++ ))
+          (( _mc_pass++ ))
         else
           echo "${_mc_red}FAIL${_mc_reset} — pid $_mc_alive_pid not running"
-          (( fail++ ))
+          (( _mc_fail++ ))
         fi
       else
         echo "${_mc_red}FAIL${_mc_reset} — heartbeat ${alive_age}s stale"
-        (( fail++ ))
+        (( _mc_fail++ ))
       fi
     else
       echo "${_mc_red}FAIL${_mc_reset} — no heartbeat file"
-      (( fail++ ))
+      (( _mc_fail++ ))
     fi
 
     # Gate 3: single session→name (no dual ownership)
@@ -1537,24 +1536,24 @@ sys.exit(1)
     for _mc_sf in "$PAD_STATE/sessions/"*; do
       [ -f "$_mc_sf" ] || continue
       if [ "$(cat "$_mc_sf" 2>/dev/null)" = "$_mc_pilot" ]; then
-        (( session_count++ ))
+        (( _mc_session_count++ ))
         [ "$_mc_session_count" -gt 1 ] && extra_sessions="$_mc_extra_sessions $(basename "$_mc_sf")"
       fi
     done
     # Also check whoami fallback
     if [ "$(cat "$PAD_STATE/whoami" 2>/dev/null || true)" = "$_mc_pilot" ]; then
-      (( session_count++ ))
-      extra_sessions="$_mc_extra_sessions whoami"
+      (( _mc_session_count++ ))
+      _mc_extra_sessions="$_mc_extra_sessions whoami"
     fi
     if [ "$_mc_session_count" -eq 1 ]; then
       echo "${_mc_green}PASS${_mc_reset} — exactly 1 session→name binding"
-      (( pass++ ))
+      (( _mc_pass++ ))
     elif [ "$_mc_session_count" -eq 0 ]; then
       echo "${_mc_red}FAIL${_mc_reset} — no session bound"
-      (( fail++ ))
+      (( _mc_fail++ ))
     else
       echo "${_mc_red}FAIL${_mc_reset} — $_mc_session_count bindings (dual ownership):$_mc_extra_sessions"
-      (( fail++ ))
+      (( _mc_fail++ ))
     fi
 
     # Gate 4: wake round-trip — seen cursor advanced + reply ordinal exists
@@ -1562,21 +1561,21 @@ sys.exit(1)
     _mc_seen_file="$PAD_STATE/seen.$_mc_pilot"
     _mc_seen_before=0 seen_after=0
     if [ -f "$_mc_seen_file" ]; then
-      seen_before="$(cat "$_mc_seen_file" 2>/dev/null || echo 0)"
+      _mc_seen_before="$(cat "$_mc_seen_file" 2>/dev/null || echo 0)"
     fi
     # Send a test ping via the pad (silent, just advances the cursor)
     "$0" say "[$_mc_pilot migration-check ping $(date +%s)]" >/dev/null 2>&1 || true
     sleep 2
     # Check the seen cursor advanced
     if [ -f "$_mc_seen_file" ]; then
-      seen_after="$(cat "$_mc_seen_file" 2>/dev/null || echo 0)"
+      _mc_seen_after="$(cat "$_mc_seen_file" 2>/dev/null || echo 0)"
     fi
     if [ "$_mc_seen_after" -gt "$_mc_seen_before" ]; then
       echo "${_mc_green}PASS${_mc_reset} — seen cursor $_mc_seen_before → $_mc_seen_after (wake delivered)"
-      (( pass++ ))
+      (( _mc_pass++ ))
     else
       echo "${_mc_red}FAIL${_mc_reset} — seen cursor did not advance ($_mc_seen_before → $_mc_seen_after)"
-      (( fail++ ))
+      (( _mc_fail++ ))
     fi
 
     # Summary
@@ -1585,7 +1584,7 @@ sys.exit(1)
       echo "${_mc_green}ALL 4 GATES PASSED — @$_mc_pilot migration proven.${_mc_reset}"
       exit 0
     else
-      echo "${_mc_red}$_mc_fail/$(( pass + fail )) GATES FAILED — revert @$_mc_pilot to kitty.${_mc_reset}"
+      echo "${_mc_red}$_mc_fail/$(( _mc_pass + _mc_fail )) GATES FAILED — revert @$_mc_pilot to kitty.${_mc_reset}"
       exit 1
     fi
     ;;
