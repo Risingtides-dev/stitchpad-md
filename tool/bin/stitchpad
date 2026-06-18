@@ -1567,6 +1567,7 @@ sys.exit(1)
     "$0" say "[$_mc_pilot migration-check ping $(date +%s)]" >/dev/null 2>&1 || true
     sleep 2
     # Check the seen cursor advanced
+    _mc_seen_after=0
     if [ -f "$_mc_seen_file" ]; then
       _mc_seen_after="$(cat "$_mc_seen_file" 2>/dev/null || echo 0)"
     fi
