@@ -241,10 +241,19 @@ EOF
     sid="${1:?usage: stitchpad bind-session <session_id|-> <name>}"
     nm="${2:?name required}"
     if [ "$sid" = "-" ]; then
-      # ponytail: whoami is a shared file — writing it stamps every session as $nm.
-      # Agents without a session id must use STITCHPAD_NAME or KITTY_WINDOW_ID instead.
-      echo "✓ no session id — set STITCHPAD_NAME=$nm in your shell to pin identity" >&2
+      echo "✓ no session id — set STITCHPAD_NAME=$nm or VELOCITY_SURFACE_ID in your shell to pin identity" >&2
     else
+      # Collision guard: if this session id is ALREADY bound to a DIFFERENT name,
+      # blindly clobbering is the identity-bleed bug (one session id rebound to
+      # whoever posted last → CLI posts mis-stamped). Refuse unless --force, so a
+      # crossed binding is loud, not silent. Same name = idempotent, always ok.
+      _prev="$(cat "$PAD_STATE/sessions/$sid" 2>/dev/null || true)"
+      if [ -n "$_prev" ] && [ "$_prev" != "$nm" ] && [ "${STITCHPAD_FORCE_BIND:-0}" != "1" ]; then
+        echo "✗ session $sid is already bound to @$_prev (not @$nm)." >&2
+        echo "  Two runtimes may be sharing one session id, or this is a stale cross-bind." >&2
+        echo "  If you really mean to rebind, re-run with STITCHPAD_FORCE_BIND=1." >&2
+        exit 1
+      fi
       printf '%s' "$nm" > "$PAD_STATE/sessions/$sid"
       echo "✓ bound session $sid → @$nm"
     fi

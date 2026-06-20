@@ -67,14 +67,22 @@ sp_me() {
   # leak through and mis-stamp posts (@Jill bug). Try both before trusting the name.
   local sid="${STITCHPAD_SESSION:-${CLAUDE_CODE_SESSION_ID:-}}"
   if [ -n "$sid" ] && [ -f "$PAD_STATE/sessions/$sid" ]; then
-    cat "$PAD_STATE/sessions/$sid" 2>/dev/null; return
+    local _bound; _bound="$(cat "$PAD_STATE/sessions/$sid" 2>/dev/null)"
+    # Binding wins (kills the stale-STITCHPAD_NAME @Jill bug). But if the live
+    # invocation ALSO declared a different STITCHPAD_NAME, the binding may be a
+    # cross-bind (the @codex bleed): surface it loudly so it's not silent.
+    if [ -n "${STITCHPAD_NAME:-}" ] && [ -n "$_bound" ] && [ "$_bound" != "$STITCHPAD_NAME" ]; then
+      echo "stitchpad: WARNING — session $sid is bound to @$_bound but STITCHPAD_NAME=@$STITCHPAD_NAME." >&2
+      echo "  Posting as @$_bound (binding wins). If wrong, rebind: STITCHPAD_FORCE_BIND=1 stitchpad bind-session $sid $STITCHPAD_NAME" >&2
+    fi
+    echo "$_bound"; return
   fi
   if [ -n "${STITCHPAD_NAME:-}" ]; then echo "$STITCHPAD_NAME"; return; fi
   # Surface-id resolution: each Velocity surface UUID is unique and stable, and
   # the roster records each agent's surface as "...@@<surface_id>". A process that
   # knows its own surface ID can find its name unambiguously — no shared
   # state. Keeps sessions from colliding on whoami when no session id is present.
-  local _surface_id="${VELOCITY_SURFACE_ID:-${SUPACODE_SURFACE_ID:-}}"
+  local _surface_id="${VELOCITY_SURFACE_ID:-}"
   if [ -n "$_surface_id" ]; then
     local _wname
     _wname="$(sp_roster | awk -F'|' -v w="$_surface_id" '
