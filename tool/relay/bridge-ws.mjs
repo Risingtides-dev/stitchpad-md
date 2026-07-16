@@ -179,6 +179,15 @@ async function onDm(p, msg) {
         : `stitchpad DM from @${from} (private — not on the pad; reply lands on the pad unless they DM you back): ${clean}`;
       const { err } = await sh(HERDR, ["pane", "run", pane, dmsg]);
       delivered = !err;
+      if (delivered) {
+        // SETTLE-RETRY: the Enter from `pane run` can fire before the TUI
+        // finishes ingesting the paste, leaving the text parked in the input
+        // box. After a beat, one bare Enter submits it; if it already went
+        // through, a bare Enter on an empty input is a no-op. (Same trick as
+        // the wake adapter.)
+        await new Promise(r => setTimeout(r, 2000));
+        await sh(HERDR, ["pane", "run", pane, ""]).catch(() => {});
+      }
       if (delivered && cmd) log(p.name, `DM @${from} → @${to} slash /${cmd} injected raw`);
     }
   }

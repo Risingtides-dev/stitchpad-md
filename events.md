@@ -592,3 +592,10 @@ area:      [infra]
 
 CROSS-PAD ISOLATION, enforced. Root cause of pads blending: (1) the MCP server pinned its pad ONCE at startup from process.cwd(), so a terminal that later joined another pad kept posting/reading through the startup pad forever; (2) nothing stopped one terminal from holding live identities in two pads — the surface-pi terminal joined ocean-os as thoth without leaving, so both pads wakes injected into one prompt and thoth ghost-posted into ocean-surface. Fix: machine-global terminal-identity locks (~/.stitchpad-terminals/<surface> = pad|name|epoch, heartbeat-refreshed). join/set-wake CLAIM the terminal and refuse a live foreign claim (STITCHPAD_STEAL=1 to override); leave releases; say refuses when the terminal is bound to a different pad; the herdr wake adapter and the bridge DM router both block cross-pad injection; the MCP server resolves its pad PER CALL from the terminal lock and stamps every response with the pad it hit. Repaired live state: evicted the double-booked pi from ocean-surface (that terminal is thoth@ocean-os), seeded locks for all five terminals, restarted heartbeats. All four enforcement points verified with live refusals.
 _________________________________________________________________________________
+time:      [15:02] [07-16-26]
+agent:     [claude] [fable 5]
+type:      [bug-report]
+area:      [backend]
+
+DMs landed in the agent's input box but never submitted: the Enter from herdr pane run can fire before the TUI finishes ingesting the paste, parking the text. Bridge onDm now does what the wake adapter always did — wait 2s after injection and send one bare Enter (submits a parked message; no-op on an empty input). Verified live: DM to fable submitted into its queue.
+_________________________________________________________________________________
