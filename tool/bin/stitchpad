@@ -141,7 +141,7 @@ EOF
     # ONE TERMINAL = ONE PAD: claim the target terminal before touching the
     # roster; a terminal live in another pad refuses the join outright.
     if [ "$target" != "-" ]; then sp_term_lock_claim "$target" "$who" || exit 1
-    elif [ -n "${VELOCITY_SURFACE_ID:-}" ]; then sp_term_lock_claim "$VELOCITY_SURFACE_ID" "$who" || exit 1; fi
+    else _jsurf="$(sp_this_surface)"; [ -n "$_jsurf" ] && { sp_term_lock_claim "$_jsurf" "$who" || exit 1; }; fi
     sp_lock || exit 1
     if sp_user_exists "$who"; then sp_unlock; echo "$who already in roster"; exit 0; fi
     # Insert before the closing fence of the roster block (atomic under lock).
@@ -357,8 +357,9 @@ EOF
     # ONE TERMINAL = ONE PAD: if this terminal holds a live identity lock for a
     # DIFFERENT pad, refuse to post here — the resolver (cwd walk-up, stale MCP
     # server, wrong env) picked the wrong pad. Kills cross-pad ghost posts.
-    if [ -n "${VELOCITY_SURFACE_ID:-}" ]; then
-      _holder="$(sp_term_lock_check "$VELOCITY_SURFACE_ID" "$from")" || {
+    _ssurf="$(sp_this_surface)"
+    if [ -n "$_ssurf" ]; then
+      _holder="$(sp_term_lock_check "$_ssurf" "$from")" || {
         echo "stitchpad: REFUSED — this terminal is bound to ${_holder%%|*} (as @$(echo "$_holder" | cut -d'|' -f2)), not $PAD_DIR. cd there or 'stitchpad leave' first." >&2; exit 1; }
     fi
     image_path=""
@@ -595,7 +596,7 @@ PY
         fi
         parent="${STITCHPAD_HEARTBEAT_PARENT_PID:-$PPID}"
         session="${STITCHPAD_SESSION:-}"
-        surface="${VELOCITY_SURFACE_ID:-}"
+        surface="$(sp_this_surface)"
         target=""
         if [ -n "$surface" ] && [ -n "${VELOCITY_TAB_ID:-}" ]; then
           target="${VELOCITY_WORKTREE_ID:-}@@${VELOCITY_TAB_ID}@@$surface"
@@ -631,7 +632,7 @@ PY
           pid="$(heartbeat_existing_pid "$who" 2>/dev/null || true)"
         fi
         [ -n "$pid" ] || pid="$BASHPID"
-        _surface="${VELOCITY_SURFACE_ID:-}"
+        _surface="$(sp_this_surface)"
         _target=""
         if [ -n "$_surface" ] && [ -n "${VELOCITY_TAB_ID:-}" ]; then
           _target="${VELOCITY_WORKTREE_ID:-}@@${VELOCITY_TAB_ID}@@$_surface"

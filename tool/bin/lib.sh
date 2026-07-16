@@ -358,7 +358,19 @@ sp_engagement() {
 # post into pad B, unless the operator explicitly steals it (STITCHPAD_STEAL=1)
 # or the old claim goes stale (>300s without a heartbeat).
 SP_TERMDIR="$HOME/.stitchpad-terminals"
-sp_term_surface_of() { printf '%s' "${1##*@@}"; }   # velocity targets are wt@@tab@@surface; herdr targets ARE the surface
+sp_term_surface_of() { printf '%s' "${1##*@@}"; }   # composite targets are wt@@tab@@surface; herdr targets ARE the surface
+# The terminal id of THIS shell's pane. Legacy surface env if present, else the
+# herdr pane env resolved to its terminal id (herdr panes export HERDR_PANE_ID,
+# not a terminal id — without this, every guard keyed on the surface env was
+# inert in herdr panes and heartbeats captured empty surfaces).
+sp_this_surface() {
+  if [ -n "${VELOCITY_SURFACE_ID:-}" ]; then printf '%s' "$VELOCITY_SURFACE_ID"; return 0; fi
+  if [ -n "${HERDR_PANE_ID:-}" ] && command -v herdr >/dev/null 2>&1; then
+    herdr pane get "$HERDR_PANE_ID" 2>/dev/null \
+      | sed -n 's/.*"terminal_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+  fi
+  return 0
+}
 sp_term_lock_claim() { # $1=target/surface $2=name — refuses on a live foreign claim
   local surface who cur pad name ts now
   surface="$(sp_term_surface_of "$1")"; who="$2"

@@ -620,3 +620,10 @@ area:      [infra]
 
 Velocity-only assumption cleaned out of the MCP join: agents living in herdr panes joined as `velocity|push|-` (no wake target — the join only looked for VELOCITY_* env), then needed a manual set-wake to become push-reachable. parentSurfaceEnv now also recovers HERDR_PANE_ID (inherited or via the ps-eww parent fallback), and when no Velocity surface is present the join resolves the pane to its stable terminal id via `herdr agent get` and joins as `herdr|push|term_xxx` — same target shape the herdr wake adapter and the ~/.stitchpad-terminals locks are keyed by. surfaceAdapter schema/validation now accepts herdr. Verified live: pane w1:pJ resolves to term_656b323c46b3818, matching the hand-pinned fable row.
 _________________________________________________________________________________
+time:      [15:55] [07-16-26]
+agent:     [claude] [fable 5]
+type:      [bug-report]
+area:      [infra]
+
+Follow-up to the isolation wall after fable's mangled rejoin exposed gaps: (1) the sp() [pad: x] stamp I added broke fable's new whoami identity validation (multi-line output never matches the handle regex, so every MCP rejoin minted a fresh identity) — sp() output is clean again and only agent-facing say/read/who stamp via padStamp(); (2) the terminal-lock guards and heartbeat surface capture were keyed on VELOCITY_SURFACE_ID, which herdr panes do not set — added sp_this_surface() (velocity env, else HERDR_PANE_ID resolved to its terminal id via the herdr CLI) and wired it into the say guard, join claim fallback, and both heartbeat paths, so guards are live in herdr panes and heartbeats stop writing empty surfaces. Velocity naming purge in server.mjs + adapter files is fable's lane (mid-cleanup, coordinated by DM); worktree note: server.mjs carries both sessions' edits and lands with fable's commit.
+_________________________________________________________________________________
