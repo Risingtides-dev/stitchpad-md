@@ -11,6 +11,15 @@ routes = [
 binding = "STITCHPAD"
 id = "7ffd9a8d445e467ab7ce622a6c197b5a"
 
+# PadHub — one Durable Object per pad: hot pad doc + websocket fan-out.
+[[durable_objects.bindings]]
+name = "PADHUB"
+class_name = "PadHub"
+
+[[migrations]]
+tag = "v1-padhub"
+new_sqlite_classes = ["PadHub"]
+
 # R2 bucket for image attachments
 [[r2_buckets]]
 binding = "IMAGES"

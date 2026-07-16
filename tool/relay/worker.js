@@ -8,10 +8,119 @@
 //   GET  /pad.colors?pad=NAME (PWA)        → [{name, color}, ...] single-source colors
 //   POST /say?pad=NAME       (PWA)         body {from,text} → queued for NAME
 //   GET  /outbox?pad=NAME    (Mac/tunnel)  → drain NAME's queued phone messages
+//   GET  /ws?pad=NAME&token= (PWA/bridge)  → websocket into that pad's PadHub DO
 //
-// Auth: shared bearer token (STITCHPAD_TOKEN) on every request.
+// REALTIME (PadHub Durable Object, one per pad): the hot pad document lives in
+// DO storage; /push and /pad route through the DO. Every push that actually
+// CHANGES the pad fans out {type:"pad", data} to all connected PWA sockets —
+// no more 3s poll lurch. If a bridge socket is connected, /say and /dm are
+// delivered to it instantly; otherwise they fall back to the KV queues the
+// bridge already drains over HTTP. KV keeps: pads index, invites, queues.
+//
+// Auth: shared bearer token (STITCHPAD_TOKEN) on every request (WS: ?token=).
 const json = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { "content-type": "application/json", "access-control-allow-origin": "*" } });
 const cors = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,OPTIONS", "access-control-allow-headers": "authorization,content-type" };
+
+// One DO instance per pad (idFromName(pad)). Pure hot path: pad doc + sockets.
+export class PadHub {
+  constructor(ctx, env) { this.ctx = ctx; this.env = env; }
+
+  async loadDoc(pad) {
+    let doc = await this.ctx.storage.get("doc");
+    if (!doc) {
+      // lazy-migrate: seed from the legacy KV copy so /pad never goes blank
+      const v = await this.env.STITCHPAD.get(`pad:${pad}`);
+      if (v) { doc = JSON.parse(v); await this.ctx.storage.put("doc", doc); }
+    }
+    return doc || null;
+  }
+
+  async fetch(req) {
+    const url = new URL(req.url);
+    const pad = url.searchParams.get("pad") || "";
+
+    // websocket attach (worker already authed the token)
+    if (url.pathname === "/ws") {
+      const role = url.searchParams.get("role") === "bridge" ? "bridge" : "client";
+      const pair = new WebSocketPair();
+      const [clientEnd, server] = Object.values(pair);
+      this.ctx.acceptWebSocket(server, [role]);
+      return new Response(null, { status: 101, webSocket: clientEnd });
+    }
+
+    // bridge push → store; broadcast ONLY when content actually changed
+    // (the bridge pushes every ~3s; identical snapshots must not repaint phones)
+    if (url.pathname === "/push" && req.method === "POST") {
+      const body = await req.json();
+      const at = Date.now();
+      const doc = { ...body, name: pad, at };
+      const sig = JSON.stringify([body.pad, body.roster, body.colors, body.profiles, body.claims, body.files]);
+      const prevSig = await this.ctx.storage.get("sig");
+      await this.ctx.storage.put("doc", doc);
+      if (sig !== prevSig) {
+        await this.ctx.storage.put("sig", sig);
+        // pads index (sidebar recency order) — only on real change, sparing KV
+        const idx = JSON.parse((await this.env.STITCHPAD.get("index")) || "{}");
+        idx[pad] = at; await this.env.STITCHPAD.put("index", JSON.stringify(idx));
+        this.broadcast("client", JSON.stringify({ type: "pad", data: doc }));
+      }
+      return json({ ok: true, changed: sig !== prevSig });
+    }
+
+    if (url.pathname === "/pad" && req.method === "GET") {
+      const doc = await this.loadDoc(pad);
+      if (!doc) return json({ pad: "", roster: [], name: pad, at: 0 });
+      const etag = `"${doc.at || 0}"`;
+      if ((req.headers.get("if-none-match") || "") === etag) {
+        return new Response(null, { status: 304, headers: { ...cors, etag } });
+      }
+      const tail = parseInt(url.searchParams.get("tail") || "0", 10);
+      let out = doc;
+      if (tail > 0 && typeof doc.pad === "string") {
+        out = { ...doc, pad: doc.pad.split("\n").slice(-tail).join("\n") };
+      }
+      return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json", ...cors, etag } });
+    }
+
+    if (url.pathname === "/pad.colors" && req.method === "GET") {
+      const doc = await this.loadDoc(pad);
+      return json(doc?.colors || {});
+    }
+
+    // instant delivery attempt: say/dm/file → a connected bridge socket.
+    // {delivered:false} tells the worker to fall back to the KV queue.
+    if (url.pathname === "/deliver" && req.method === "POST") {
+      const { kind, msg } = await req.json();
+      const bridges = this.ctx.getWebSockets("bridge");
+      if (!bridges.length) return json({ delivered: false });
+      const s = JSON.stringify({ type: kind, pad, msg });
+      let sent = 0;
+      bridges.forEach(w => { try { w.send(s); sent++; } catch {} });
+      return json({ delivered: sent > 0 });
+    }
+
+    return json({ error: "not found" }, 404);
+  }
+
+  broadcast(tag, s) { this.ctx.getWebSockets(tag).forEach(w => { try { w.send(s); } catch {} }); }
+
+  async webSocketMessage(ws, raw) {
+    let m; try { m = JSON.parse(raw); } catch { return; }
+    if (m.type === "ping") { try { ws.send('{"type":"pong"}'); } catch {} }
+  }
+  webSocketClose() {}
+  webSocketError() {}
+}
+
+const hub = (env, pad) => env.PADHUB.get(env.PADHUB.idFromName(pad));
+// try instant websocket delivery to the pad's bridge; false → caller queues in KV
+async function tryDeliver(env, pad, kind, msg) {
+  try {
+    const r = await hub(env, pad).fetch(`https://hub/deliver?pad=${encodeURIComponent(pad)}`, { method: "POST", body: JSON.stringify({ kind, msg }) });
+    if (!r.ok) return false;
+    return (await r.json()).delivered === true;
+  } catch { return false; }
+}
 
 export default {
   async fetch(req, env) {
@@ -52,15 +161,15 @@ export default {
     }
 
     // Non-API paths → serve the PWA static assets (index.html, manifest).
-    const API = ["/login", "/join-request", "/invite", "/pads", "/pad", "/pad.colors", "/push", "/say", "/outbox", "/dm", "/dmbox", "/upload-image", "/upload-file", "/filebox"];
+    const API = ["/login", "/join-request", "/invite", "/pads", "/pad", "/pad.colors", "/push", "/say", "/outbox", "/dm", "/dmbox", "/upload-image", "/upload-file", "/filebox", "/ws"];
     if (!API.includes(url.pathname) && !url.pathname.startsWith("/img/") && !url.pathname.startsWith("/f/")) {
       return env.ASSETS ? env.ASSETS.fetch(req) : json({ error: "no assets" }, 404);
     }
-    const tok = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+    // WS can't set headers from the browser — accept the bearer as ?token= there.
+    const tok = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || (url.searchParams.get("token") || "");
     if (!env.STITCHPAD_TOKEN || tok !== env.STITCHPAD_TOKEN) return json({ error: "unauthorized" }, 401);
 
     const pad = (url.searchParams.get("pad") || "").trim();
-    const padKey = pad ? `pad:${pad}` : null;
 
     // Create an invite token (OWNER-authed — passed the bearer gate above). Stores
     // invite:<token> → {pad, handle, expires}. Owner shares the token; remote agent
@@ -85,7 +194,7 @@ export default {
       return json({ ok: true, revoked: rev });
     }
 
-    // list all pads (index maintained on push)
+    // list all pads (index maintained by PadHub on changed pushes)
     if (url.pathname === "/pads" && req.method === "GET") {
       const idx = JSON.parse((await env.STITCHPAD.get("index")) || "{}");
       return json(Object.entries(idx).map(([name, at]) => ({ name, at })).sort((a, b) => b.at - a.at));
@@ -100,71 +209,43 @@ export default {
     }
     if (!pad) return json({ error: "missing ?pad=NAME" }, 400);
 
-    if (url.pathname === "/push" && req.method === "POST") {
-      const body = await req.json();
-      const at = Date.now();
-      await env.STITCHPAD.put(padKey, JSON.stringify({ ...body, name: pad, at }));
-      const idx = JSON.parse((await env.STITCHPAD.get("index")) || "{}");
-      idx[pad] = at; await env.STITCHPAD.put("index", JSON.stringify(idx));
-      return json({ ok: true });
+    // realtime hot path → the pad's Durable Object
+    if (url.pathname === "/ws" || url.pathname === "/push" || url.pathname === "/pad" || url.pathname === "/pad.colors") {
+      return hub(env, pad).fetch(req);
     }
-    if (url.pathname === "/pad" && req.method === "GET") {
-      const v = await env.STITCHPAD.get(padKey);
-      if (!v) return json({ pad: "", roster: [], name: pad, at: 0 });
-      const data = JSON.parse(v);
-      // ETag: use the stored `at` timestamp as the version identifier.
-      const etag = `"${data.at || 0}"`;
-      const ifNoneMatch = req.headers.get("if-none-match") || "";
-      if (ifNoneMatch === etag) {
-        return new Response(null, { status: 304, headers: { ...cors, etag } });
-      }
-      // Tail support: ?tail=N returns only the last N lines of pad markdown,
-      // keeping roster/files/colors/metadata intact. This shrinks the polling
-      // payload for large pads where the PWA only needs recent context.
-      const tail = parseInt(url.searchParams.get("tail") || "0", 10);
-      let responseData = data;
-      if (tail > 0 && typeof data.pad === "string") {
-        const lines = data.pad.split("\n");
-        responseData = { ...data, pad: lines.slice(-tail).join("\n") };
-      }
-      return new Response(JSON.stringify(responseData), {
-        status: 200,
-        headers: { "content-type": "application/json", ...cors, etag }
-      });
-    }
-    if (url.pathname === "/pad.colors" && req.method === "GET") {
-      const v = await env.STITCHPAD.get(padKey);
-      const colors = v ? (JSON.parse(v).colors || {}) : {};
-      return json(colors);
-    }
+
     if (url.pathname === "/say" && req.method === "POST") {
       const { from, text } = await req.json();
       if (!text) return json({ error: "empty" }, 400);
+      const msg = { from: from || "smaths", text, at: Date.now() };
+      if (await tryDeliver(env, pad, "say", msg)) return json({ ok: true, delivered: "ws" });
       const qk = `outbox:${pad}`;
       const q = JSON.parse((await env.STITCHPAD.get(qk)) || "[]");
-      q.push({ from: from || "smaths", text, at: Date.now() });
+      q.push(msg);
       await env.STITCHPAD.put(qk, JSON.stringify(q));
       return json({ ok: true, queued: q.length });
     }
-    // True DM: queued for the Mac bridge to inject DIRECTLY into the target
-    // agent's terminal session (herdr pane) — never lands on the shared pad.
+    if (url.pathname === "/outbox" && req.method === "GET") {
+      const qk = `outbox:${pad}`;
+      const q = JSON.parse((await env.STITCHPAD.get(qk)) || "[]");
+      await env.STITCHPAD.put(qk, "[]");
+      return json({ messages: q });
+    }
+    // True DM: injected DIRECTLY into the target agent's terminal session
+    // (herdr pane) — never lands on the shared pad.
     if (url.pathname === "/dm" && req.method === "POST") {
       const { from, to, text } = await req.json();
       if (!to || !text) return json({ error: "need to + text" }, 400);
+      const msg = { from: from || "smaths", to, text, at: Date.now() };
+      if (await tryDeliver(env, pad, "dm", msg)) return json({ ok: true, delivered: "ws" });
       const qk = `dmbox:${pad}`;
       const q = JSON.parse((await env.STITCHPAD.get(qk)) || "[]");
-      q.push({ from: from || "smaths", to, text, at: Date.now() });
+      q.push(msg);
       await env.STITCHPAD.put(qk, JSON.stringify(q));
       return json({ ok: true, queued: q.length });
     }
     if (url.pathname === "/dmbox" && req.method === "GET") {
       const qk = `dmbox:${pad}`;
-      const q = JSON.parse((await env.STITCHPAD.get(qk)) || "[]");
-      await env.STITCHPAD.put(qk, "[]");
-      return json({ messages: q });
-    }
-    if (url.pathname === "/outbox" && req.method === "GET") {
-      const qk = `outbox:${pad}`;
       const q = JSON.parse((await env.STITCHPAD.get(qk)) || "[]");
       await env.STITCHPAD.put(qk, "[]");
       return json({ messages: q });
@@ -231,9 +312,11 @@ export default {
         httpMetadata: { contentType: file.type || "application/octet-stream" },
         customMetadata: { originalName: file.name || safe, uploadedAt: new Date().toISOString() }
       });
+      const fmsg = { name: safe, key, at: Date.now() };
+      if (await tryDeliver(env, pad, "file", fmsg)) return json({ ok: true, name: safe, key, size: file.size, delivered: "ws" });
       const qk = `filebox:${pad}`;
       const q = JSON.parse((await env.STITCHPAD.get(qk)) || "[]");
-      q.push({ name: safe, key, at: Date.now() });
+      q.push(fmsg);
       await env.STITCHPAD.put(qk, JSON.stringify(q));
       return json({ ok: true, name: safe, key, size: file.size });
     }

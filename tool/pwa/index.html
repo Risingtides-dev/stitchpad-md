@@ -291,7 +291,7 @@ async function loadPads(){
   if(!pad&&pads[0])pad=pads[0].name;
   pads.forEach(p=>{const d=document.createElement("div");d.className="chan"+(p.name===pad?" on":"");
     d.innerHTML=`<span class="h">#</span>${esc(p.name)}`;
-    d.onclick=()=>{pad=p.name;dmWith="";PAD_ETAG="";resetLog();localStorage.removeItem("sp_dm");localStorage.setItem("sp_pad",pad);setDrawer(false);render();loadPads();};
+    d.onclick=()=>{pad=p.name;dmWith="";PAD_ETAG="";resetLog();localStorage.removeItem("sp_dm");localStorage.setItem("sp_pad",pad);setDrawer(false);render();loadPads();connectWS();};
     cl.appendChild(d);});
 }
 function parse(md){const out=[];let cur=null;
@@ -349,7 +349,13 @@ async function render(){
   // Store the new ETag for next poll
   const newEtag = r.headers.get("etag");
   if (newEtag) PAD_ETAG = newEtag;
-  const d=await r.json();
+  paint(await r.json());
+}
+// paint(d): render a pad document — called by both the poll path (render) and
+// the websocket push path (instant fan-out from the PadHub Durable Object).
+function paint(d){
+  if(d.name&&d.name!==pad)return;   // stale socket message after a pad switch
+  if(d.at)PAD_ETAG=`"${d.at}"`;     // keep fallback polling 304-coherent
   document.getElementById("chTitle").textContent=dmWith?("@"+dmWith):("# "+pad);
   setRelayColors(d.colors);   // single source of truth — relay's stitchpad-color table
   ROSTER=(d.roster||[]).map(m=>m.name); FILES=d.files||[];
@@ -671,20 +677,45 @@ if(window.visualViewport){
 ta.addEventListener("focus",()=>setTimeout(()=>{if(nearBottom())stick();},350));
 const loginEl=document.getElementById("login"),le=document.getElementById("le");
 document.getElementById("dmlist").addEventListener("click",e=>{const t=e.target.closest(".dm-item");if(t)openDM(t.dataset.dm);});
+// REALTIME: websocket to the pad's PadHub Durable Object. Messages land the
+// instant the bridge pushes a changed pad — no poll lurch. Polling stays as
+// the fallback transport: 3s when the socket is down, a lazy 30s safety sweep
+// while it's up (catches anything a dropped frame missed).
+let WS=null,WS_TRY=0,wsPing=null;
+function wsClose(){try{WS&&WS.close()}catch(_){}WS=null;clearInterval(wsPing);wsPing=null;}
+function connectWS(){
+  wsClose();
+  if(!pad||!TOKEN||document.hidden)return;
+  const myPad=pad;
+  const s=new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws?pad="+encodeURIComponent(pad)+"&token="+encodeURIComponent(TOKEN));
+  WS=s;
+  s.onopen=()=>{WS_TRY=0;restartPolling();render();};
+  s.onmessage=e=>{
+    let m;try{m=JSON.parse(e.data)}catch(_){return}
+    if(m.type==="pad"&&m.data&&myPad===pad)paint(m.data);
+  };
+  s.onclose=()=>{if(WS!==s)return;WS=null;clearInterval(wsPing);wsPing=null;restartPolling();
+    if(APP_ON&&!document.hidden)setTimeout(connectWS,Math.min(15000,1000*Math.pow(2,WS_TRY++)));};
+  s.onerror=()=>{try{s.close()}catch(_){}};
+  wsPing=setInterval(()=>{try{s.readyState===1&&s.send('{"type":"ping"}')}catch(_){}},25000);
+}
+const wsLive=()=>WS&&WS.readyState===1;
 // polling lifecycle: pause entirely while the tab is hidden (battery + relay
 // load), refresh IMMEDIATELY on return so the pad feels live the moment you look.
 let APP_ON=false,pollTimer=null,padsTimer=null;
 function startPolling(){
   if(pollTimer)return;
-  pollTimer=setInterval(render,3000);padsTimer=setInterval(loadPads,15000);
+  pollTimer=setInterval(()=>{if(!wsLive())render();},wsLive()?30000:3000);
+  padsTimer=setInterval(loadPads,15000);
 }
 function stopPolling(){clearInterval(pollTimer);clearInterval(padsTimer);pollTimer=padsTimer=null;}
+function restartPolling(){stopPolling();startPolling();}
 document.addEventListener("visibilitychange",()=>{
   if(!APP_ON)return;
-  if(document.hidden)stopPolling();
-  else{render();loadPads();startPolling();}
+  if(document.hidden){stopPolling();wsClose();}
+  else{render();loadPads();startPolling();connectWS();}
 });
-function startApp(){APP_ON=true;loginEl.classList.remove("show");setMe(me);dmWith=localStorage.getItem("sp_dm")||"";resetLog();loadPads();render();startPolling();}
+function startApp(){APP_ON=true;loginEl.classList.remove("show");setMe(me);dmWith=localStorage.getItem("sp_dm")||"";resetLog();loadPads();render();startPolling();connectWS();}
 function setMe(name){me=name||"smaths";localStorage.setItem("sp_me",me);
   const t=document.getElementById("tags");if(t)t.textContent="you are @"+me+" · type @name to address agents";}
 async function doLogin(){const user=document.getElementById("lu").value.trim(),pass=document.getElementById("lp").value;le.textContent="";
