@@ -3,8 +3,9 @@ mod widgets;
 
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
-        KeyModifiers, MouseButton, MouseEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton,
+        MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -33,6 +34,8 @@ use widgets::roster::{RosterMember, RosterRail};
 struct App {
     tab: u8, // 0=Chat 1=Tasks
     input: String,
+    /// Cursor position in the input, as a CHAR index (0..=input char len).
+    cursor: usize,
     detail_open: bool,
     watcher_alive: bool,
     flash: Option<(String, std::time::Instant)>,
@@ -55,19 +58,73 @@ impl App {
             _ => None,
         }
     }
+
+    // ── Cursor-aware input editing (char-indexed; input may hold any UTF-8) ──
+    fn byte_at(&self, ci: usize) -> usize {
+        self.input
+            .char_indices()
+            .nth(ci)
+            .map(|(b, _)| b)
+            .unwrap_or(self.input.len())
+    }
+    fn char_len(&self) -> usize {
+        self.input.chars().count()
+    }
+    fn insert_str(&mut self, s: &str) {
+        let b = self.byte_at(self.cursor);
+        self.input.insert_str(b, s);
+        self.cursor += s.chars().count();
+    }
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let b = self.byte_at(self.cursor - 1);
+        self.input.remove(b);
+        self.cursor -= 1;
+    }
+    fn delete_at(&mut self) {
+        if self.cursor >= self.char_len() {
+            return;
+        }
+        let b = self.byte_at(self.cursor);
+        self.input.remove(b);
+    }
+    fn delete_word_before(&mut self) {
+        let b = self.byte_at(self.cursor);
+        let head = self.input[..b].trim_end().to_string();
+        let cut = head.rfind(' ').map(|i| i + 1).unwrap_or(0);
+        let tail = self.input[b..].to_string();
+        self.input = format!("{}{}", &head[..cut], tail);
+        self.cursor = head[..cut].chars().count();
+    }
+    fn clear_input(&mut self) {
+        self.input.clear();
+        self.cursor = 0;
+    }
 }
 
 fn main() -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     // Restore the terminal even on panic — a raw-mode corpse is the worst UX.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
         default_hook(info);
     }));
 
@@ -77,6 +134,7 @@ fn main() -> io::Result<()> {
     let mut app = App {
         tab: 0,
         input: String::new(),
+        cursor: 0,
         detail_open: false,
         watcher_alive: RosterRail::watcher_alive(),
         flash: None,
@@ -147,9 +205,17 @@ fn main() -> io::Result<()> {
             use ratatui::widgets::{Block, Borders, Paragraph};
 
             let show_input = app.tab == 0;
+            // Input box grows with content (wrapped), 1..=4 text rows + border.
+            let input_h = if show_input {
+                let inner_w = (f.area().width.saturating_sub(2)).max(8) as usize;
+                let rows = (app.char_len() + 1).div_ceil(inner_w).clamp(1, 4) as u16;
+                rows + 2
+            } else {
+                0
+            };
             let mut constraints = vec![Constraint::Length(1), Constraint::Min(3)];
             if show_input {
-                constraints.push(Constraint::Length(3));
+                constraints.push(Constraint::Length(input_h));
             }
             constraints.push(Constraint::Length(1));
             let rows = Layout::default()
@@ -193,16 +259,30 @@ fn main() -> io::Result<()> {
                     matches!(m.live_status, widgets::roster::LiveStatus::Online)
                 })
                 .count();
-            let right = format!(
+            let dot = if app.watcher_alive { "●" } else { "○" };
+            let right_full = format!(
                 "{} {} · {}/{} online ",
-                if app.watcher_alive { "●" } else { "○" },
+                dot,
                 if app.watcher_alive { "watcher" } else { "watcher DOWN (^S)" },
                 online,
                 roster.members.len(),
             );
-            let pad_w = (header_row.width as usize)
-                .saturating_sub(header.iter().map(|s| s.content.chars().count()).sum::<usize>())
-                .saturating_sub(right.chars().count());
+            let right_compact = format!("{} {}/{} ", dot, online, roster.members.len());
+            // +1: the ⛵ renders 2 cells but counts as 1 char.
+            let left_w = 1 + header
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>();
+            let avail = (header_row.width as usize).saturating_sub(left_w);
+            // Fit the full status if we can, the compact one if we must.
+            let right = if right_full.chars().count() <= avail {
+                right_full
+            } else if right_compact.chars().count() <= avail {
+                right_compact
+            } else {
+                String::new()
+            };
+            let pad_w = avail.saturating_sub(right.chars().count());
             header.push(Span::raw(" ".repeat(pad_w)));
             header.push(Span::styled(
                 right,
@@ -259,18 +339,35 @@ fn main() -> io::Result<()> {
                             dim,
                         ))
                     } else {
-                        Line::from(vec![
-                            Span::raw(app.input.clone()),
-                            Span::styled("█", Style::default().fg(Color::Cyan)),
-                        ])
+                        // cursor-split render: text before · cursor cell · text after
+                        let b = app.byte_at(app.cursor);
+                        let before = app.input[..b].to_string();
+                        let mut rest = app.input[b..].chars();
+                        let under = rest.next();
+                        let after: String = rest.collect();
+                        let mut spans = vec![Span::raw(before)];
+                        match under {
+                            Some(c) => spans.push(Span::styled(
+                                c.to_string(),
+                                Style::default().add_modifier(Modifier::REVERSED),
+                            )),
+                            None => spans.push(Span::styled(
+                                "█",
+                                Style::default().fg(Color::Cyan),
+                            )),
+                        }
+                        spans.push(Span::raw(after));
+                        Line::from(spans)
                     };
                     f.render_widget(
-                        Paragraph::new(content).block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_style(border)
-                                .title(format!(" @{} ", me)),
-                        ),
+                        Paragraph::new(content)
+                            .wrap(ratatui::widgets::Wrap { trim: false })
+                            .block(
+                                Block::default()
+                                    .borders(Borders::ALL)
+                                    .border_style(border)
+                                    .title(format!(" @{} ", me)),
+                            ),
                         area,
                     );
                 }
@@ -411,16 +508,19 @@ fn main() -> io::Result<()> {
                             continue;
                         }
                         KeyCode::Char('u') => {
-                            app.input.clear();
+                            app.clear_input();
                             continue;
                         }
                         KeyCode::Char('w') => {
-                            // delete last word (readline convention)
-                            let trimmed = app.input.trim_end().to_string();
-                            match trimmed.rfind(' ') {
-                                Some(i) => app.input = trimmed[..=i].to_string(),
-                                None => app.input.clear(),
-                            }
+                            app.delete_word_before(); // readline convention
+                            continue;
+                        }
+                        KeyCode::Char('a') => {
+                            app.cursor = 0;
+                            continue;
+                        }
+                        KeyCode::Char('e') => {
+                            app.cursor = app.char_len();
                             continue;
                         }
                         _ => {}
@@ -467,21 +567,29 @@ fn main() -> io::Result<()> {
                                 .map(|o| o.status.success())
                                 .unwrap_or(false);
                             if ok {
-                                app.input.clear();
+                                app.clear_input();
                                 messages.refresh();
                             } else {
                                 app.flash("send failed — is this a pad dir?");
                             }
                         }
                     }
-                    KeyCode::Esc => app.input.clear(),
-                    KeyCode::Backspace => {
-                        app.input.pop();
-                    }
+                    KeyCode::Esc => app.clear_input(),
+                    KeyCode::Backspace => app.backspace(),
+                    KeyCode::Delete => app.delete_at(),
+                    KeyCode::Left => app.cursor = app.cursor.saturating_sub(1),
+                    KeyCode::Right => app.cursor = (app.cursor + 1).min(app.char_len()),
+                    KeyCode::Home => app.cursor = 0,
+                    KeyCode::End => app.cursor = app.char_len(),
                     KeyCode::Tab => {
-                        // @name completion from the roster (last token).
-                        if let Some(done) = complete_mention(&app.input, &roster.members) {
-                            app.input = done;
+                        // @name completion (only when the cursor sits at the end,
+                        // where the @-token being typed lives).
+                        if app.cursor == app.char_len() {
+                            if let Some(done) = complete_mention(&app.input, &roster.members)
+                            {
+                                app.input = done;
+                                app.cursor = app.char_len();
+                            }
                         }
                     }
                     KeyCode::Up | KeyCode::PageUp => {
@@ -496,9 +604,18 @@ fn main() -> io::Result<()> {
                             messages.scroll_down();
                         }
                     }
-                    KeyCode::Char(c) => app.input.push(c),
+                    KeyCode::Char(c) => app.insert_str(&c.to_string()),
                     _ => {}
                 }
+                }
+                Event::Paste(s) => {
+                    // Bracketed paste: land the WHOLE paste in the input as one
+                    // unit — without this, a newline in pasted text acts as Enter
+                    // and fires partial messages mid-paste.
+                    if app.tab == 0 {
+                        let clean = s.replace('\r', "\n");
+                        app.insert_str(&clean);
+                    }
                 }
                 _ => {}
             }
@@ -508,6 +625,7 @@ fn main() -> io::Result<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen
     )?;
