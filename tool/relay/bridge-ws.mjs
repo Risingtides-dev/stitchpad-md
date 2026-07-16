@@ -145,6 +145,8 @@ async function onTerm(p, msg) {
   log(p.name, `session-chat @${agent}: ${out.error || (out.msgs?.length + " msgs")} → posted ${r.ok ? "ok" : "FAILED " + (r.status || r.statusText)}`);
 }
 
+// commands that open interactive dialogs/pickers — dead ends from a phone
+const MODAL_CMDS = new Set(["status", "config", "permissions", "help", "doctor", "login", "logout", "exit", "quit", "vim", "hooks", "mcp", "agents", "resume", "theme", "terminal-setup", "install-github-app", "ide", "bug"]);
 async function onDm(p, msg) {
   const { from, to, text } = msg;
   if (!to || !text) return;
@@ -152,10 +154,22 @@ async function onDm(p, msg) {
   const pane = await resolvePane(p, to);
   {
     if (pane) {
-      const dmsg = `stitchpad DM from @${from} (private — not on the pad; reply lands on the pad unless they DM you back): ${text}`
-        .replace(/[\x00-\x1f\x7f]/g, " ").replace(/ +/g, " ");
+      // A DM starting with "/" is a REAL slash command for the harness — inject
+      // it raw (no DM wrapper, which would turn it into chat text). Modal
+      // commands are refused: they open a dialog nobody on a phone can Esc out
+      // of, freezing the agent's terminal.
+      const clean = text.replace(/[\x00-\x1f\x7f]/g, " ").replace(/ +/g, " ").trim();
+      const cmd = (clean.match(/^\/([a-zA-Z0-9_:-]+)/) || [])[1]?.toLowerCase();
+      if (cmd && MODAL_CMDS.has(cmd)) {
+        log(p.name, `DM @${from} → @${to} refused modal /${cmd}`);
+        await api(`/dm-in?pad=${encodeURIComponent(p.name)}`, { method: "POST", body: JSON.stringify({ from: to, to: from, text: `⚠ /${cmd} opens a dialog only a keyboard can close — not sent. Commands that work from here: /compact, /clear, /model <name>, or any skill.`, at: Date.now() }) }).catch(() => {});
+        return;
+      }
+      const dmsg = cmd ? clean
+        : `stitchpad DM from @${from} (private — not on the pad; reply lands on the pad unless they DM you back): ${clean}`;
       const { err } = await sh(HERDR, ["pane", "run", pane, dmsg]);
       delivered = !err;
+      if (delivered && cmd) log(p.name, `DM @${from} → @${to} slash /${cmd} injected raw`);
     }
   }
   if (delivered) log(p.name, `DM @${from} → @${to} terminal (${text.slice(0, 40)})`);

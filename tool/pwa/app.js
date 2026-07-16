@@ -273,6 +273,7 @@ async function sendText(text) {
       const r = await api("/dm?pad=" + encodeURIComponent(store.pad), { method: "POST", body: JSON.stringify({ from: store.me, to, text }) });
       if (!r.ok) throw new Error("HTTP " + r.status);
       pushDm({ from: store.me, to, text, at: Date.now() });
+      if (/^\/[a-zA-Z0-9_:-]+/.test(text)) notice("⚡ running " + text.split(/\s/)[0] + " in @" + to + "'s terminal");
       return { ok: true };
     } catch (err) {
       notice("⚠ DM failed (" + err.message + ") — your text is back in the box", true);
@@ -516,6 +517,15 @@ function Log() {
   </div>`;
 }
 
+// slash commands worth running from a phone (effect > output; modal ones are
+// refused by the bridge — they'd freeze the terminal on a dialog)
+const SLASH = [
+  ["compact", "shrink their context, keep a summary"],
+  ["clear", "wipe their context — fresh start"],
+  ["model", "switch model — add the name after"],
+  ["goal", "set a standing goal"],
+  ["loop", "keep iterating on a task"],
+];
 function Composer() {
   const s = useStore();
   const ta = useRef(), hl = useRef(), fpick = useRef();
@@ -536,6 +546,9 @@ function Composer() {
 
   const activeToken = () => {
     const t = ta.current, c = t.selectionStart, before = t.value.slice(0, c);
+    // "/" only at the very start of a DM: it becomes a REAL slash command in
+    // that agent's terminal (the bridge injects it raw, no DM wrapper)
+    if (s.dmWith) { const sm = before.match(/^\/([a-zA-Z0-9_:-]*)$/); if (sm) return { kind: "/", q: sm[1], start: 0 }; }
     const m = before.match(/(^|[\s])([@>])([a-zA-Z0-9_./-]*)$/);
     return m ? { kind: m[2], q: m[3], start: c - m[3].length - 1 } : null;
   };
@@ -545,13 +558,15 @@ function Composer() {
     const q = t.q.toLowerCase();
     const items = t.kind === "@"
       ? ["all", ...roster.filter(n => n !== s.me)].filter(n => n.toLowerCase().startsWith(q)).slice(0, 12)
+      : t.kind === "/"
+      ? SLASH.filter(c => c[0].startsWith(q)).slice(0, 12)
       : filesList.filter(f => f.toLowerCase().includes(q)).slice(0, 12);
     setAc(items.length ? { kind: t.kind, start: t.start, items, sel: 0 } : null);
   };
   const applyAc = a => {
     if (!a || !a.items.length) return;
     const pick = a.items[a.sel];
-    const ins = (a.kind === "@" ? "@" + pick : pick) + " ";
+    const ins = (a.kind === "@" ? "@" + pick : a.kind === "/" ? "/" + pick[0] : pick) + " ";
     const t = ta.current;
     const nv = t.value.slice(0, a.start) + ins + t.value.slice(t.selectionStart);
     setVal(nv); setAc(null);
@@ -591,6 +606,8 @@ function Composer() {
               ${it !== "all" && html`<span class="adot" style=${{ background: liveState(it) === "working" ? "#2ea043" : liveState(it) === "dnd" ? "#d29922" : liveState(it) === "offline" ? "#4b5563" : "#3fb950" }}></span>`}
               <span class="sub">${it === "all" ? "everyone" : ((s.doc?.roster || []).find(m => m.name === it) || {}).adapter || ""}</span>
             </div>`
+          : ac.kind === "/"
+          ? html`<div key=${it[0]} class=${"ac-item" + (i === ac.sel ? " sel" : "")} onMouseDown=${e => { e.preventDefault(); applyAc({ ...ac, sel: i }); }}><span class="fico">/</span><span class="anm">/${it[0]}</span><span class="sub">${it[1]}</span></div>`
           : html`<div key=${it} class=${"ac-item" + (i === ac.sel ? " sel" : "")} onMouseDown=${e => { e.preventDefault(); applyAc({ ...ac, sel: i }); }}><span class="fico">›</span><span class="anm">${it}</span></div>`)}
       </div>
       <div class="ac-hint"><span><b>↑↓</b> navigate</span><span><b>tab</b> select</span><span><b>esc</b> dismiss</span></div>

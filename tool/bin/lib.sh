@@ -265,7 +265,8 @@ sp_user_exists() { [ -n "$(sp_user_field "$1" adapter)" ]; }
 # by the watcher to detect when a NEW mention has landed (count went up).
 sp_count_to() {
   local who="$1" file="${2:-$PAD_MD}" n
-  n=$(grep -icE "(^|[^a-z0-9_-])@${who}([^a-z0-9_-]|$)" "$file" 2>/dev/null) || true
+  # @all is a broadcast — it counts as a mention TO everyone.
+  n=$(grep -icE "(^|[^a-z0-9_-])@(${who}|all)([^a-z0-9_-]|$)" "$file" 2>/dev/null) || true
   echo "${n:-0}"
 }
 
@@ -298,12 +299,17 @@ sp_latest_to() {
 # wake. Sender opt-in, no content guessing.
 sp_engagement() {
   local who="$1"
-  awk -v who="$(printf '%s' "$1" | tr 'A-Z' 'a-z')" '
+  # roster names, for the implicit-silent word list below: only AGENT authors get
+  # their bare "ack"/"noted" posts silenced. A human operator typing "@pi ack"
+  # means "wake pi" — guessing it silent made operator pings vanish (the pi bug).
+  local agents
+  agents="$(sp_roster 2>/dev/null | cut -d'|' -f1 | tr 'A-Z' 'a-z' | paste -sd, -)"
+  awk -v who="$(printf '%s' "$1" | tr 'A-Z' 'a-z')" -v agents="$agents" '
     # An ADDRESS is "@name" at line-start or after whitespace — NOT after punctuation
     # like / ` " (), so a quoted/referenced "@name" (e.g. "the @john/@dale discussion")
     # or a backticked `@name` does not count as addressing someone. buf joins lines with
     # a leading space, so (^|[ \t]) covers block-start, every line-start, and mid-sentence.
-    function body_mentions(name,   re) { re="(^|[ \t])@" name "([^a-z0-9_-]|$)"; return (buf ~ re) }
+    function body_mentions(name,   re) { re="(^|[ \t])@(" name "|all)([^a-z0-9_-]|$)"; return (buf ~ re) }
     function flush() {
       if (author=="") return
       n++
@@ -329,8 +335,9 @@ sp_engagement() {
       n_at=0; tmp=b; while (match(tmp,/@[a-z0-9_-]+/)) { n_at++; tmp=substr(tmp,RSTART+RLENGTH) }
       sub(/^(@[a-z0-9_-]+[ \t]*)+/,"",b); sub(/[ \t]+$/,"",b)
       if (n_at < 2) {
-        if (b ~ /^(\.|\[ack\])/) silent=1
-        if (b ~ /^(ack|read|noted|got it|standing down|standing by|stand by|will do|understood|done here|copy|sounds good)[. !]*$/) silent=1
+        if (b ~ /^(\.|\[ack\])/) silent=1   # explicit opt-in: silent for anyone
+        # implicit word-list: agents only — an operator addressing an agent always wakes it
+        if (index("," agents ",", "," author ",") > 0 && b ~ /^(ack|read|noted|got it|standing down|standing by|stand by|will do|understood|done here|copy|sounds good)[. !]*$/) silent=1
       }
     }
     # Strip inline code (`...`) before appending to buffer — prevents `@name` in code

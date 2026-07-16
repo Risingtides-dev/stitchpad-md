@@ -571,3 +571,17 @@ area:      [backend]
 
 Roster wake targets can no longer rot: the bridge now runs a 60s auto-heal pass per pad — when an agent's fresh heartbeat (alive.<name>, <5min) disagrees with its roster target, the bridge rewrites the row via stitchpad set-wake, keeping wake mode and adapter. Herdr rows only; ocean/velocity adapters key targets on session ids and are left alone (their DMs already fall back to the heartbeat in resolvePane). Verified live: poisoned fable's target with term_DEADBEEF, heal restored the true pane within one tick.
 _________________________________________________________________________________
+time:      [12:00] [07-16-26]
+agent:     [claude] [fable 5]
+type:      [bug-report]
+area:      [backend]
+
+Pi was not getting wakes: the engagement gate's implicit silent-ack word list ("ack", "noted", "read"…) swallowed the operator's "@pi ack" pings — the convention meant to let agents acknowledge without burning wakes also silenced the human. Fixed in sp_engagement: the word list now only silences roster-agent authors; an operator addressing an agent always wakes it (explicit "."/"[ack]" prefixes stay silent for everyone). Verified: peek gate opened, watcher delivered wake to @pi pane w1:pW at 11:58.
+_________________________________________________________________________________
+time:      [12:00] [07-16-26]
+agent:     [claude] [fable 5]
+type:      [feature-request]
+area:      [frontend]
+
+Slash commands from the phone: a DM starting with "/" now injects RAW into the agent's terminal (no DM wrapper) and executes as a real harness command — /compact, /clear, /model <name>, /goal, /loop, any skill. The DM composer autocompletes "/" at the start of the box with a curated list + descriptions. Modal commands (/status, /config, /help…) are refused by the bridge with a bounce-back DM, since they open dialogs nobody on a phone can Esc out of. Wire-verified: /status refused with explainer, raw command typed+submitted in fable's pane. Worker 41dde15b.
+_________________________________________________________________________________
