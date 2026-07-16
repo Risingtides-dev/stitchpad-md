@@ -23,7 +23,7 @@ function setRelayColors(c) {
   else if (c && typeof c === "object") Object.assign(m, c);
   RELAY_COLORS = m;
 }
-const colorFor = n => RELAY_COLORS[n] || OVR[n] || PAL[[...(n || "")].reduce((s, c) => s + c.charCodeAt(0), 0) % PAL.length];
+const colorFor = n => RELAY_COLORS[n] || OVR[n] || (typeof harnessOf === "function" && HARNESS_COLOR[harnessOf(n)]) || PAL[[...(n || "")].reduce((s, c) => s + c.charCodeAt(0), 0) % PAL.length];
 const lum = h => { const c = h.replace("#", ""); return (0.299 * parseInt(c.slice(0, 2), 16) + 0.587 * parseInt(c.slice(2, 4), 16) + 0.114 * parseInt(c.slice(4, 6), 16)) / 255; };
 const onLight = n => lum(colorFor(n)) > 0.85;
 const nameColor = n => onLight(n) ? "#e7e9ec" : colorFor(n);
@@ -60,6 +60,7 @@ const store = {
   pad: localStorage.getItem("sp_pad") || "",
   dmWith: localStorage.getItem("sp_dm") || "",
   pads: [], doc: null, blocks: null, pending: [], notices: [], dmlogs: {},
+  summary: null, summaryOpen: false, summarizing: false,
   wasBottom: true, authed: false, loginErr: "",
 };
 const subs = new Set();
@@ -145,6 +146,13 @@ function connectWS() {
     let m; try { m = JSON.parse(e.data); } catch (_) { return; }
     if (m.type === "pad" && m.data && myPad === store.pad) acceptDoc(m.data);
     if (m.type === "dm" && m.msg && myPad === store.pad) pushDm(m.msg);
+    if (m.type === "summary" && m.data && myPad === store.pad) {
+      store.summary = m.data; store.summaryOpen = true; store.summarizing = false; publish();
+      // notify even if he's off in another app — that's the point of the button
+      if (typeof Notification !== "undefined" && Notification.permission === "granted" && document.hidden) {
+        try { new Notification("stitchpad — #" + store.pad + " summary", { body: (m.data.text || m.data.error || "").slice(0, 160), icon: "icon-192.png" }); } catch (_) {}
+      }
+    }
   };
   s.onclose = () => {
     if (WS !== s) return;
@@ -218,6 +226,20 @@ async function redeemInvite(inv) {
 
 // liveness: pushed by the bridge as PROFILES[name].online; offline trumps activity
 const profiles = () => store.doc?.profiles || {};
+// HARNESS-AWARE identity: whatever an agent calls itself (bob, nancy, …), its
+// logo and color come from the harness it runs on. Name stays for @mentions.
+const HARNESS_LOGO = { claude: "claude", codex: "codex", pi: "pi", ocean: "ocean" };
+const HARNESS_COLOR = { claude: "#d97757", codex: "#a8a3ff", pi: "#aeb8c4", ocean: "#38bdf8", deepseek: "#4d6bfe" };
+function harnessOf(n) {
+  const p = profiles()[n] || {};
+  const r = ((store.doc?.roster) || []).find(m => m.name === n) || {};
+  let h = (p.harness || r.adapter || "").toLowerCase();
+  if (h.startsWith("claude")) h = "claude";
+  if (h.startsWith("codex")) h = "codex";
+  // herdr is a pane wrapper, not a harness — fall through to the model hint
+  if (h === "herdr") { const m = (p.model || "").toLowerCase(); h = m.includes("claude") ? "claude" : m.includes("gpt") || m.includes("codex") ? "codex" : "pi"; }
+  return h;
+}
 const isOnline = n => { const p = profiles()[n] || {}; return p.online !== undefined ? !!p.online : true; };
 const liveState = n => { if (!isOnline(n)) return "offline"; const s = (profiles()[n] || {}).status; return s === "dnd" ? "dnd" : s === "working" ? "working" : "available"; };
 
@@ -252,6 +274,19 @@ async function sendText(text) {
     return { ok: false, text };
   }
 }
+async function requestSummary() {
+  if (store.summarizing || !store.pad) return;
+  if (typeof Notification !== "undefined" && Notification.permission === "default") { try { Notification.requestPermission(); } catch (_) {} }
+  store.summarizing = true; publish();
+  try {
+    const r = await api("/summarize?pad=" + encodeURIComponent(store.pad), { method: "POST", body: JSON.stringify({ by: store.me }) });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "HTTP " + r.status);
+    notice("✨ summarizing the thread — I'll pop it up here (and notify you) when it's ready");
+  } catch (err) {
+    store.summarizing = false; publish();
+    notice("⚠ summarize failed: " + err.message, true);
+  }
+}
 async function uploadFiles(files) {
   for (const f of files) {
     if (f.size > 15 * 1024 * 1024) { notice("⚠ " + f.name + " is over the 15MB cap", true); continue; }
@@ -271,10 +306,14 @@ async function uploadFiles(files) {
 const LOGO = () => html`<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"><rect x="6" y="6" width="52" height="52" rx="14" fill="#0d9488"/><path d="M16 44 L32 20 L48 44" stroke="#faf9f7" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="7 6"/><circle cx="16" cy="44" r="3.4" fill="#faf9f7"/><circle cx="48" cy="44" r="3.4" fill="#faf9f7"/><circle cx="32" cy="20" r="3.4" fill="#faf9f7"/></svg>`;
 
 function Av({ n, cls = "av", trigger = true }) {
-  const [err, setErr] = useState(false);
-  useEffect(() => setErr(false), [n]);
+  // avatar resolution: per-name png → harness logo png → colored initials
+  const [step, setStep] = useState(0);
+  useEffect(() => setStep(0), [n]);
+  const hz = HARNESS_LOGO[harnessOf(n)];
+  const src = step === 0 ? "avatars/" + encodeURIComponent(n) + ".png"
+    : step === 1 && hz && hz !== n ? "avatars/" + hz + ".png" : null;
   return html`<div class=${cls + (trigger ? " card-trigger" : "")} data-agent=${n} style=${{ background: colorFor(n), color: initInk(n) }}>
-    ${!err && html`<img key=${n} src=${"avatars/" + encodeURIComponent(n) + ".png"} alt="" loading="lazy" decoding="async" onError=${() => setErr(true)} />`}<span>${initials(n)}</span>
+    ${src && html`<img key=${n + step} src=${src} alt="" loading="lazy" decoding="async" onError=${() => setStep(step + (step === 0 && hz && hz !== n ? 1 : 2))} />`}<span>${initials(n)}</span>
   </div>`;
 }
 
@@ -545,11 +584,16 @@ function App() {
         <button id="hamb" aria-label="channels" onClick=${() => setDrawer(!drawer)}>☰</button>
         <span class="name">${s.dmWith ? "@" + s.dmWith : "# " + (s.pad || "…")}</span>
         <span class="meta">${s.doc ? (s.dmWith ? "direct → their terminal" : members + " members") : ""}</span>
+        ${!s.dmWith && html`<button id="sumbtn" title="summarize this thread" disabled=${s.summarizing} onClick=${requestSummary}>${s.summarizing ? "…" : "✨"}<span class="lbl">${s.summarizing ? "summarizing" : "summarize"}</span></button>`}
       </div>
       <${StatusBar}/>
       <${ClaimBar}/>
       <${Log}/>
       <${Composer}/>
+      ${s.summaryOpen && s.summary && html`<div class="sum-panel">
+        <h3>✨ Thread summary <span class="sub">#${s.pad}</span><button class="x" aria-label="close" onClick=${() => { store.summaryOpen = false; publish(); }}>✕</button></h3>
+        <div class="body">${s.summary.error ? "⚠ " + s.summary.error : s.summary.text}</div>
+      </div>`}
     </div>
   </div>`;
 }

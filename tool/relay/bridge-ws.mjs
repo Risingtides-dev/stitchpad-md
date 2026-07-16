@@ -10,7 +10,7 @@
 // drain every 30s (catches messages queued while a socket was down).
 //
 //   STITCHPAD_RELAY=... STITCHPAD_TOKEN=... node bridge-ws.mjs [roots...]
-import { execFile, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, watch, writeFileSync, readFileSync, truncateSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
@@ -20,6 +20,8 @@ const RELAY = process.env.STITCHPAD_RELAY || "https://stitchpad.agentsworld.org"
 const TOKEN = process.env.STITCHPAD_TOKEN;
 if (!TOKEN) { console.error("[bridge-ws] STITCHPAD_TOKEN required"); process.exit(1); }
 const ROOTS = process.argv.slice(2).length ? process.argv.slice(2) : [os.homedir()];
+// optional allowlist: STITCHPAD_PADS="ocean-surface,ocean-os" → only these sync
+const ONLY = (process.env.STITCHPAD_PADS || "").split(",").map(s => s.trim()).filter(Boolean);
 const HOME = os.homedir();
 const SP = existsSync(join(HOME, ".stitchpad/bin/stitchpad")) ? join(HOME, ".stitchpad/bin/stitchpad") : "stitchpad";
 const PUSH_ONCE = join(dirname(new URL(import.meta.url).pathname), "bridge-push-once.sh");
@@ -44,6 +46,7 @@ function findPads() {
       "-o", "-type", "d", "-name", ".stitchpad", "-print"], { timeout: 60000 });
     for (const p of String(res.stdout || "").split("\n")) {
       if (!p || p.includes("/.stitchpad/.stitchpad")) continue;
+      if (ONLY.length && !ONLY.includes(basename(dirname(p)))) continue;
       if (existsSync(join(p, "stitchpad.md"))) out.push(p);
     }
   }
@@ -118,6 +121,7 @@ function connect(p) {
     if (m.type === "say") await onSay(p, m.msg || {});
     else if (m.type === "dm") await onDm(p, m.msg || {});
     else if (m.type === "file") await onFile(p, m.msg || {});
+    else if (m.type === "summarize") summarize(p, m.msg || {});   // async, don't block the socket
   };
   ws.onclose = () => { if (p.ws !== ws || p.closed) return; p.ws = null; setTimeout(() => connect(p), Math.min(30000, 1000 * 2 ** (p.tries++))); };
   ws.onerror = () => { try { ws.close(); } catch {} };
@@ -145,6 +149,35 @@ function track(padd) {
   connect(p);
   pushPad(p, "startup");
   log("tracking", p.name);
+}
+
+// thread summarizer: PWA button → ws {type:"summarize"} → run headless claude
+// over the pad tail → POST /summary-in (relay stores + notifies every phone).
+const CLAUDE = existsSync(join(HOME, ".local/bin/claude")) ? join(HOME, ".local/bin/claude") : "claude";
+async function summarize(p, msg) {
+  log(p.name, `summarize requested by @${msg.by || "?"}`);
+  let padTxt = "";
+  try { padTxt = readFileSync(join(p.padd, "stitchpad.md"), "utf8"); } catch {}
+  const tail = padTxt.split("\n").slice(-600).join("\n");
+  const prompt = `Summarize this multi-agent coding thread for the human operator (@${msg.by || "smaths"}). ` +
+    `Plain english, short bullets, under 180 words. Cover: (1) current state / what just happened, ` +
+    `(2) what each agent is working on, (3) decisions made, (4) anything BLOCKED waiting on the operator — put that first if it exists. ` +
+    `Respond with ONLY the summary text.`;
+  const post = async body => api(`/summary-in?pad=${encodeURIComponent(p.name)}`, { method: "POST", body: JSON.stringify({ ...body, by: msg.by }) }).catch(() => {});
+  try {
+    const c = spawn(CLAUDE, ["-p", prompt, "--model", "haiku"], { env: process.env, stdio: ["pipe", "pipe", "pipe"] });
+    let out = "", errS = "";
+    c.stdout.on("data", d => out += d);
+    c.stderr.on("data", d => errS += d);
+    const t = setTimeout(() => { try { c.kill("SIGKILL"); } catch {} }, 180000);
+    c.on("close", async code => {
+      clearTimeout(t);
+      const text = out.trim();
+      if (code === 0 && text) { await post({ text }); log(p.name, "summary posted"); }
+      else { await post({ error: (errS || "summarizer exited " + code).slice(0, 300) }); log(p.name, "summary FAILED:", (errS || String(code)).slice(0, 120)); }
+    });
+    c.stdin.write("THREAD:\n\n" + tail); c.stdin.end();
+  } catch (e) { await post({ error: e.message }); }
 }
 
 // agent → human DMs: `stitchpad dm` appends to .state/dmout.jsonl; forward each

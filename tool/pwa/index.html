@@ -143,6 +143,16 @@ button{font:inherit}
 #send svg{width:17px;height:17px;display:block}
 .tags{padding:7px 2px 0;color:var(--faint);font-size:12px}
 #hamb{display:none;font-size:20px;background:0;border:0;color:var(--ink);padding:2px 6px;cursor:pointer}
+#sumbtn{margin-left:auto;display:flex;align-items:center;gap:6px;background:transparent;border:1px solid var(--paper-edge);border-radius:9px;color:var(--ink-dim);font-size:13px;font-weight:600;padding:5px 10px;cursor:pointer;transition:background .15s var(--ease),color .15s var(--ease)}
+#sumbtn:hover{background:var(--paper-3);color:var(--accent-ink)}
+#sumbtn:disabled{opacity:.55;cursor:default}
+@media(max-width:560px){#sumbtn .lbl{display:none}}
+.sum-panel{position:fixed;right:16px;bottom:calc(86px + env(safe-area-inset-bottom));width:min(420px,calc(100vw - 32px));max-height:60vh;overflow-y:auto;background:var(--panel-2);border:1px solid var(--edge);border-radius:var(--r-l);box-shadow:0 18px 48px rgba(0,0,0,.55);z-index:45;padding:15px 16px;animation:card-in .2s var(--ease) both}
+.sum-panel h3{margin:0 0 8px;font-size:14px;display:flex;align-items:center;gap:8px;color:var(--txt)}
+.sum-panel h3 .sub{color:var(--dim);font-weight:400;font-size:12.5px}
+.sum-panel .x{margin-left:auto;background:transparent;border:0;color:var(--dim);cursor:pointer;font-size:15px;padding:2px 6px;border-radius:6px}
+.sum-panel .x:hover{color:var(--txt);background:var(--panel)}
+.sum-panel .body{font-size:13.5px;line-height:1.55;white-space:pre-wrap;color:#d3d8de}
 
 /* ── login ── */
 #login{position:fixed;inset:0;background:var(--col);display:none;flex-direction:column;align-items:center;justify-content:center;z-index:var(--z-login);gap:12px;padding:24px}
