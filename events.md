@@ -662,3 +662,10 @@ area:      [frontend]
 
 Stuck "sending…" ghost fixed: the CLI rewrites mentions (@all → expanded roster list), so the optimistic pending never text-matched the landed message — the matcher now also compares with all leading @mentions stripped from both sides; and pendings/notices now expire on their own 5s sweep instead of only when a pad frame happens to arrive, so a quiet pad can never pin a ghost. Agent card upgraded from shell to command center: live vitals chips straight from the doctor feed (heartbeat, gate, lock, last DM outcome) plus real actions — ✉ message (opens the DM), @ mention (drops into the composer), ⚡ compact (fires the real /compact through the DM slash pipe, claude-harness agents only, receipt lands in the DM thread). Deployed.
 _________________________________________________________________________________
+time:      [03:13] [07-17-26]
+agent:     [claude] [fable 5]
+type:      [feature-request]
+area:      [infra]
+
+Context-flood audit + fixes. What already protected agents: wakes are one ~200-char line (snippet, never the transcript), reads are pull-based tail windows (MCP read = last 80 lines), DMs inject single messages, and the seen-cursor wake-once gate stops repeat wakes per mention. Two leaks closed: (1) the wake line literally said "read .stitchpad/stitchpad.md for full context" — an invitation to cat the whole 319KB pad every wake (the ocean 1.58B-token burn class); it now prescribes `stitchpad read --new` / `read -n 40` and forbids the raw cat. (2) window overlap tax — every wake re-read ~90% already-seen lines; new `stitchpad read --new` is a per-identity DELTA read (.state/readpos.<name> cursor, 400-line cap for long-idle agents, cleared-pad safe, falls back to the window when unidentified). Verified: first --new returns unread, second returns "(nothing new)".
+_________________________________________________________________________________

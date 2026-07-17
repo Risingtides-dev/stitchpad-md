@@ -781,6 +781,27 @@ PY
 
   read)
     sp_init_paths || exit 1
+    # --new: DELTA read — only lines added since this agent's last read (per-
+    # identity cursor in .state/readpos.<name>). Kills the overlap tax where
+    # every wake re-reads a window that is 90% already in the agent's context.
+    # Falls back to the plain window when unidentified. Capped at 400 lines so
+    # a long-idle agent still can't flood itself.
+    if [ "${1:-}" = "--new" ]; then
+      _me="$(sp_me)"
+      _total="$(wc -l < "$PAD_MD" | tr -d ' ')"
+      if [ -n "$_me" ]; then
+        _pos="$(cat "$PAD_STATE/readpos.$_me" 2>/dev/null || echo 0)"
+        case "$_pos" in ''|*[!0-9]*) _pos=0;; esac
+        [ "$_pos" -gt "$_total" ] && _pos=0   # pad was cleared/rotated
+        _delta=$(( _total - _pos ))
+        if [ "$_delta" -le 0 ]; then echo "(nothing new since your last read)"; exit 0; fi
+        [ "$_delta" -gt 400 ] && { echo "(…$(( _delta - 400 )) older unread lines skipped — 400-line cap)"; _pos=$(( _total - 400 )); }
+        tail -n "+$(( _pos + 1 ))" "$PAD_MD"
+        printf '%s' "$_total" > "$PAD_STATE/readpos.$_me"
+        exit 0
+      fi
+      tail -n 80 "$PAD_MD"; exit 0
+    fi
     n=80; [ "${1:-}" = "-n" ] && n="$2"
     tail -n "$n" "$PAD_MD"
     ;;
@@ -938,7 +959,9 @@ except Exception:
     _sender="$(printf '%s\n' "$_latest" | sed -n 's/^## @\([^ ]*\).*/\1/p' | head -1)"
     [ -n "$_sender" ] || _sender="$who"
     _snip="$(printf '%s\n' "$_latest" | grep -v '^## ' | grep -v '^[[:space:]]*$' | head -1 | sed 's/^[[:space:]]*//' | cut -c1-120)"
-    printf 'stitchpad: NEW from @%s — %s — reply with @%s (read .stitchpad/stitchpad.md for full context)\n' "$_sender" "$_snip" "$_sender"
+    # context discipline: point at the WINDOWED read, never the raw file — the
+    # pad grows unbounded and "read the whole file" invites an 80K-token cat.
+    printf 'stitchpad: NEW from @%s — %s — reply with @%s (context: `stitchpad read --new` for unread only, `stitchpad read -n 40` for the recent window — do NOT cat stitchpad.md)\n' "$_sender" "$_snip" "$_sender"
     # TASKS-IN-WAKE: append the woken agent's open tickets so status upkeep happens
     # at the exact moment they're already engaging with the pad — no human nagging.
     # Relay mode has no local pad tasks; skip there.
