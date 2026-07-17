@@ -181,6 +181,15 @@ button{font:inherit}
 .doc-foot.bad{color:var(--err)}
 .doc-empty{color:var(--dim);font-size:13px;padding:8px 0}
 
+/* ── agent card: vitals + actions ── */
+#card .cvitals{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0 2px}
+#card .cvitals .chip.ok{color:#3fb950;border-color:rgba(63,185,80,.35)}
+#card .cvitals .chip.warn{color:#d29922;border-color:rgba(210,153,34,.35)}
+#card .cvitals .chip.bad{color:var(--err);border-color:rgba(248,81,73,.4)}
+#card .cacts{display:flex;gap:7px;margin:10px 0 2px}
+#card .cact{flex:1;background:var(--panel);border:1px solid var(--edge);border-radius:9px;color:var(--txt);font-size:12.5px;font-weight:600;padding:7px 4px;cursor:pointer;transition:background .15s var(--ease),border-color .15s var(--ease)}
+#card .cact:hover{background:var(--panel-2);border-color:var(--teal)}
+
 /* ── login ── */
 #login{position:fixed;inset:0;background:var(--col);display:none;flex-direction:column;align-items:center;justify-content:center;z-index:var(--z-login);gap:12px;padding:24px}
 #login::before{content:"";position:absolute;inset:0;background:radial-gradient(520px 340px at 50% 34%,rgba(13,148,136,.13),transparent 70%);pointer-events:none}

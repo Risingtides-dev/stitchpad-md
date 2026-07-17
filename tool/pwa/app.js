@@ -78,6 +78,15 @@ function stick(smooth) {
   else l.scrollTop = l.scrollHeight;
 }
 const notice = (text, err) => { const was = nearBottom(); store.notices = [...store.notices, { text, err, at: Date.now() }]; publish(); if (was) requestAnimationFrame(() => stick()); };
+// pendings must die on their own clock: the acceptDoc expiry only runs when a
+// pad frame arrives, so on a quiet pad a "sending…" ghost could sit forever
+// (e.g. when mention-rewriting broke the text match). Sweep every 5s.
+setInterval(() => {
+  const n = store.pending.filter(p => !p.at || Date.now() - p.at <= 20000);
+  if (n.length !== store.pending.length) { store.pending = n; publish(); }
+  const o = store.notices.filter(x => Date.now() - (x.at || 0) <= 60000);
+  if (o.length !== store.notices.length) { store.notices = o; publish(); }
+}, 5000);
 
 // ── transport: websocket to PadHub DO + polling fallback ─────
 let PAD_ETAG = "";
@@ -106,11 +115,15 @@ function acceptDoc(d) {
     const freshKeys = new Set(fresh.map(b => b.key));
     store.blocks = [...store.blocks.filter(b => !freshKeys.has(b.key)), ...fresh].slice(-500);
   }
-  // drop optimistic pendings that have landed (fuzzy: bridge may reflow text)
+  // drop optimistic pendings that have landed (fuzzy: bridge may reflow text,
+  // and the CLI REWRITES mentions — "@all hey" lands as "@codex @fable … hey" —
+  // so also compare with every leading @mention stripped from both sides)
+  const stripM = s => normTxt((s || "").replace(/^(\s*-?@[a-zA-Z0-9_-]+[\s,]*)+/, ""));
   const mine = fresh.filter(b => !b.sys && (b.who || "").toLowerCase() === store.me.toLowerCase()).map(b => normTxt((b.body || []).join("\n")));
   store.pending = store.pending.filter(p => {
-    const n = normTxt(p.text);
+    const n = normTxt(p.text), ns = stripM(p.text);
     if (mine.some(l => l === n || l.startsWith(n) || n.startsWith(l))) return false;
+    if (ns && mine.some(l => stripM(l) === ns)) return false;
     if (p.at && Date.now() - p.at > 20000) return false;
     return true;
   });
@@ -798,10 +811,27 @@ function agentCard(name) {
     (skills.length ? `<div class="sec"><h4>Skills</h4>${skills.map(sk => `<div class="skill"><b>${esc(sk.name || sk)}</b>${sk.desc ? " — " + esc(sk.desc) : ""}</div>`).join("")}</div>` : "") +
     (!role && !prof.persona && !skills.length ? `<div class="sec" style="color:var(--dim)">Full profile not pushed yet (bridge \`profiles\` blob pending).</div>` : "") +
     `</div>`;
+  // LIVE VITALS: the doctor snapshot already knows this agent's real state —
+  // surface it right on the card instead of making him open the panel.
+  const dv = (store.doctor?.agents || []).find(a => a.name === name);
+  const vit = dv ? `<div class="cvitals">` +
+    `<span class="chip ${dv.hb_age < 0 || dv.hb_age > 120 ? "bad" : "ok"}">♥ ${fmtAge(dv.hb_age)}</span>` +
+    `<span class="chip ${dv.gate === "owes a reply" ? "warn" : ""}">${esc(dv.gate || "")}</span>` +
+    (dv.lock && dv.lock !== "ok" ? `<span class="chip bad">${esc(dv.lock)}</span>` : "") +
+    (dv.last_dm ? `<span class="chip ${dv.last_dm.status === "delivered" ? "" : "bad"}">dm ${dv.last_dm.status === "delivered" ? "✓✓" : "✗"} ${fmtAge(dv.last_dm.ago)} ago</span>` : "") +
+    `</div>` : "";
+  // ACTIONS: message → the DM pane; mention → drops @name in the composer;
+  // compact → the real /compact through the DM slash pipe (claude only).
+  const isClaude = harnessOf(name) === "claude";
+  const acts = `<div class="cacts">` +
+    `<button class="cact" data-act="dm" data-n="${esc(name)}">✉ message</button>` +
+    `<button class="cact" data-act="mention" data-n="${esc(name)}">@ mention</button>` +
+    (isClaude ? `<button class="cact" data-act="compact" data-n="${esc(name)}">⚡ compact</button>` : "") +
+    `</div>`;
   return `<div class="top" style="background:${col}"></div><div class="body">` + pfp +
     `<div class="nm" style="color:${nameColor(name)}">@${esc(name)}</div>` +
     (role ? `<div class="role">${esc(role)}</div>` : "") +
-    (chips ? `<div class="meta">${chips}</div>` : "") + full +
+    (chips ? `<div class="meta">${chips}</div>` : "") + vit + acts + full +
     `<button class="exp">View full profile ▾</button></div>`;
 }
 function openCard(name, x, y) {
@@ -814,7 +844,22 @@ function openCard(name, x, y) {
 }
 function closeCard() { cardEl.classList.remove("show", "expanded"); cardBack.classList.remove("show"); }
 cardBack.onclick = closeCard;
-cardEl.addEventListener("click", e => { if (e.target.closest(".exp")) cardEl.classList.add("expanded"); });
+cardEl.addEventListener("click", e => {
+  if (e.target.closest(".exp")) cardEl.classList.add("expanded");
+  const b = e.target.closest(".cact"); if (!b) return;
+  const n = b.dataset.n, act = b.dataset.act;
+  closeCard();
+  if (act === "dm") openDM(n);
+  else if (act === "mention") {
+    const t = document.getElementById("text");
+    if (t) { const pre = t.value && !/[\s(]$/.test(t.value) ? " @" : "@"; t.value += pre + n + " "; t.focus(); t.dispatchEvent(new Event("input", { bubbles: true })); }
+  } else if (act === "compact") {
+    api("/dm?pad=" + encodeURIComponent(store.pad), { method: "POST", body: JSON.stringify({ from: store.me, to: n, text: "/compact" }) })
+      .then(r => r.json()).then(j => { pushDm({ from: store.me, to: n, text: "/compact", at: Date.now(), id: j.id, status: "sent" }); })
+      .catch(() => notice("⚠ compact send failed", true));
+    notice("⚡ compacting @" + n + "'s context — receipt lands in their DM");
+  }
+});
 document.addEventListener("click", e => {
   const t = e.target.closest(".card-trigger"); if (!t || !t.dataset.agent) return;
   e.stopPropagation();

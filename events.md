@@ -655,3 +655,10 @@ area:      [backend]
 
 "/compact via the app doesnt work" — three findings. (1) The path itself works: live test injected /compact into fable mid-turn and the terminal compacted (26%→done), receipt delivered·terminal. (2) The real failure: slash commands are harness-specific — pi-harness agents (pi, kimi-pi) treat "/compact" as chat text, and daemon agents (ocean) have no terminal at all; the bridge now refuses both cases BEFORE pane resolution with a bounce-back DM + refused receipt, verified live against kimi-pi. (3) kimi-pi's terminal (term_656b4c26) is gone — herdr agent_not_found — while its parent-0 heartbeat ticker kept faking liveness; ticker stopped, alive file removed, so the doctor screen now shows the honest "no heartbeat". kimi-pi needs a fresh terminal + join to be reachable again.
 _________________________________________________________________________________
+time:      [02:55] [07-17-26]
+agent:     [claude] [fable 5]
+type:      [bug-report]
+area:      [frontend]
+
+Stuck "sending…" ghost fixed: the CLI rewrites mentions (@all → expanded roster list), so the optimistic pending never text-matched the landed message — the matcher now also compares with all leading @mentions stripped from both sides; and pendings/notices now expire on their own 5s sweep instead of only when a pad frame happens to arrive, so a quiet pad can never pin a ghost. Agent card upgraded from shell to command center: live vitals chips straight from the doctor feed (heartbeat, gate, lock, last DM outcome) plus real actions — ✉ message (opens the DM), @ mention (drops into the composer), ⚡ compact (fires the real /compact through the DM slash pipe, claude-harness agents only, receipt lands in the DM thread). Deployed.
+_________________________________________________________________________________
