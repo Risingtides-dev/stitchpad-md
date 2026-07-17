@@ -182,6 +182,12 @@ async function onDm(p, msg) {
     const { stdout: roster } = await sh(SP, ["roster"], { cwd: p.proj });
     const row = (roster.split("\n").find(l => l.split("|")[0] === to) || "").split("|").map(s => (s || "").trim());
     if (row[1] === "ocean" && row[3] && row[3] !== "-") {
+      if (/^\/[a-zA-Z0-9_:-]+/.test(text.trim())) {
+        log(p.name, `DM @${from} → @${to} refused slash (daemon agent has no terminal commands)`);
+        await dmStatus(p, msg, "refused", "daemon agent — no terminal commands");
+        await api(`/dm-in?pad=${encodeURIComponent(p.name)}`, { method: "POST", body: JSON.stringify({ from: to, to: from, text: `⚠ @${to} is a daemon session, not a terminal — slash commands don't exist there. Plain messages work.`, at: Date.now() }) }).catch(() => {});
+        return;
+      }
       const prompt = `stitchpad DM from @${from} (private — not on the pad): ${text}\n\nReply PRIVATELY (do not post on the pad) with:\n  cd ${p.proj} && STITCHPAD_NAME=${to} ~/.stitchpad/bin/stitchpad dm ${from} '<your reply>'`;
       const r = await fetch(`${OCEAN_URL}/v1/agent/turns`, {
         method: "POST", headers: { "content-type": "application/json" },
@@ -191,21 +197,34 @@ async function onDm(p, msg) {
       log(p.name, `DM @${from} → @${to} daemon POST ${r.status} — falling back`);
     }
   } catch {}
+  // A DM starting with "/" is a REAL slash command for the harness — inject it
+  // raw (no DM wrapper, which would turn it into chat text). Gates run BEFORE
+  // pane resolution: a refusal is about the harness/command, not reachability,
+  // and must fire even when the terminal is gone.
+  const clean = text.replace(/[\x00-\x1f\x7f]/g, " ").replace(/ +/g, " ").trim();
+  const cmd = (clean.match(/^\/([a-zA-Z0-9_:-]+)/) || [])[1]?.toLowerCase();
+  // harness gate: Claude Code (and codex) execute an injected "/cmd"; the pi
+  // TUI treats it as chat text — silently "not working" from the phone.
+  if (cmd) {
+    let rt = "";
+    try { rt = readFileSync(join(p.padd, ".state", "runtime." + to), "utf8").trim(); } catch {}
+    if (rt === "pi") {
+      log(p.name, `DM @${from} → @${to} refused slash /${cmd} (pi harness)`);
+      await dmStatus(p, msg, "refused", `@${to} runs pi — /${cmd} is not a pi command`);
+      await api(`/dm-in?pad=${encodeURIComponent(p.name)}`, { method: "POST", body: JSON.stringify({ from: to, to: from, text: `⚠ @${to} runs the pi harness — /${cmd} is a Claude Code command and would land as chat text. Plain messages still work.`, at: Date.now() }) }).catch(() => {});
+      return;
+    }
+  }
+  // modal gate: these open a dialog nobody on a phone can Esc out of
+  if (cmd && MODAL_CMDS.has(cmd)) {
+    log(p.name, `DM @${from} → @${to} refused modal /${cmd}`);
+    await dmStatus(p, msg, "refused", `/${cmd} is interactive-only`);
+    await api(`/dm-in?pad=${encodeURIComponent(p.name)}`, { method: "POST", body: JSON.stringify({ from: to, to: from, text: `⚠ /${cmd} opens a dialog only a keyboard can close — not sent. Commands that work from here: /compact, /clear, /model <name>, or any skill.`, at: Date.now() }) }).catch(() => {});
+    return;
+  }
   const pane = await resolvePane(p, to);
   {
     if (pane) {
-      // A DM starting with "/" is a REAL slash command for the harness — inject
-      // it raw (no DM wrapper, which would turn it into chat text). Modal
-      // commands are refused: they open a dialog nobody on a phone can Esc out
-      // of, freezing the agent's terminal.
-      const clean = text.replace(/[\x00-\x1f\x7f]/g, " ").replace(/ +/g, " ").trim();
-      const cmd = (clean.match(/^\/([a-zA-Z0-9_:-]+)/) || [])[1]?.toLowerCase();
-      if (cmd && MODAL_CMDS.has(cmd)) {
-        log(p.name, `DM @${from} → @${to} refused modal /${cmd}`);
-        await dmStatus(p, msg, "refused", `/${cmd} is interactive-only`);
-        await api(`/dm-in?pad=${encodeURIComponent(p.name)}`, { method: "POST", body: JSON.stringify({ from: to, to: from, text: `⚠ /${cmd} opens a dialog only a keyboard can close — not sent. Commands that work from here: /compact, /clear, /model <name>, or any skill.`, at: Date.now() }) }).catch(() => {});
-        return;
-      }
       const dmsg = cmd ? clean
         : `stitchpad DM from @${from} (private — not on the pad; reply lands on the pad unless they DM you back): ${clean}`;
       const { err } = await sh(HERDR, ["pane", "run", pane, dmsg]);

@@ -648,3 +648,10 @@ area:      [backend]
 
 Added `stitchpad rename <old> <new>` — renames a member everywhere local state knows them: roster row (adapter/wake/target kept), wake cursors (seen/count), role/level/runtime meta, dnd/forcewake markers, session bindings and sticky autonames (content rewrite), terminal-identity locks, and the heartbeat ticker (stopped as old, restarted as new only if it was live). Pad history is untouched — a system line announces the change. Used it: @thoth in ocean-os is now @kimi-pi, with model meta kimi-k3, a Kimi-blue avatar tile (lobehub glyph rendered to match the tile family) and #1783ff brand color in both the CLI override map and the PWA fallbacks. Deployed 72271de2.
 _________________________________________________________________________________
+time:      [02:51] [07-17-26]
+agent:     [claude] [fable 5]
+type:      [bug-report]
+area:      [backend]
+
+"/compact via the app doesnt work" — three findings. (1) The path itself works: live test injected /compact into fable mid-turn and the terminal compacted (26%→done), receipt delivered·terminal. (2) The real failure: slash commands are harness-specific — pi-harness agents (pi, kimi-pi) treat "/compact" as chat text, and daemon agents (ocean) have no terminal at all; the bridge now refuses both cases BEFORE pane resolution with a bounce-back DM + refused receipt, verified live against kimi-pi. (3) kimi-pi's terminal (term_656b4c26) is gone — herdr agent_not_found — while its parent-0 heartbeat ticker kept faking liveness; ticker stopped, alive file removed, so the doctor screen now shows the honest "no heartbeat". kimi-pi needs a fresh terminal + join to be reachable again.
+_________________________________________________________________________________
