@@ -14,7 +14,7 @@ const RELAY = location.origin;
 const esc = s => (s || "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 const initials = n => (n || "?").slice(0, 2).toUpperCase();
 const OVR = { smaths: "#f1ece4", randy: "#0d9488", dale: "#00d000", larry: "#e01010", ernie: "#9b30ff", dennis: "#ff8c00", Jill: "#ff1493", mark: "#ffd700",
-  codex: "#a8a3ff", fable: "#d97757", claude: "#d97757", "claude-main": "#c96442", pi: "#aeb8c4", ocean: "#38bdf8", deepseek: "#4d6bfe" };
+  codex: "#a8a3ff", fable: "#d97757", claude: "#d97757", "claude-main": "#c96442", pi: "#aeb8c4", "kimi-pi": "#1783ff", kimi: "#1783ff", ocean: "#38bdf8", deepseek: "#4d6bfe" };
 const PAL = ["#00afff", "#ff8700", "#5fff00", "#d75fff", "#ffaf00", "#00ffff", "#ff00af", "#ffd700", "#87ffff", "#af87ff", "#ff5faf", "#5fff5f", "#ff5fff", "#87d787", "#d7af5f", "#ffff00", "#5fffff", "#ff87ff", "#afffaf", "#afffff"];
 let RELAY_COLORS = {};
 function setRelayColors(c) {
@@ -265,7 +265,7 @@ const profiles = () => store.doc?.profiles || {};
 // HARNESS-AWARE identity: whatever an agent calls itself (bob, nancy, …), its
 // logo and color come from the harness it runs on. Name stays for @mentions.
 const HARNESS_LOGO = { claude: "claude", codex: "codex", pi: "pi", ocean: "ocean" };
-const HARNESS_COLOR = { claude: "#d97757", codex: "#a8a3ff", pi: "#aeb8c4", ocean: "#38bdf8", deepseek: "#4d6bfe" };
+const HARNESS_COLOR = { claude: "#d97757", codex: "#a8a3ff", pi: "#aeb8c4", ocean: "#38bdf8", deepseek: "#4d6bfe", kimi: "#1783ff" };
 function harnessOf(n) {
   const p = profiles()[n] || {};
   const r = ((store.doc?.roster) || []).find(m => m.name === n) || {};

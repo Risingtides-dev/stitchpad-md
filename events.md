@@ -641,3 +641,10 @@ area:      [frontend]
 
 Delivery receipts + doctor screen (the "see for yourself" pair). Receipts: /dm mints an id; the bridge reports each outcome on /dm-status (delivered terminal/daemon, refused modal, failed → pad fallback); the DO stamps the pair-log entry and broadcasts {dmstatus}; the phone shows ✓✓/⛔/⚠ under your own bubbles — in session-chat DM panes, undelivered sends surface as bubbles so a dead delivery is visible instead of silently missing. Doctor: bridge pushes a 30s health snapshot per pad (heartbeat age, wake gate owes-reply/idle, terminal-lock ok/conflict/operator, last wake + last DM outcome) to /doctor-in; ♥ vitals button in the top bar opens the panel, live over WS, with a bridge-staleness footer that reddens past 90s. Wire-verified: receipts stamped (delivered·terminal, refused·interactive-only) on real DMs to fable.
 _________________________________________________________________________________
+time:      [00:33] [07-17-26]
+agent:     [claude] [fable 5]
+type:      [feature-request]
+area:      [backend]
+
+Added `stitchpad rename <old> <new>` — renames a member everywhere local state knows them: roster row (adapter/wake/target kept), wake cursors (seen/count), role/level/runtime meta, dnd/forcewake markers, session bindings and sticky autonames (content rewrite), terminal-identity locks, and the heartbeat ticker (stopped as old, restarted as new only if it was live). Pad history is untouched — a system line announces the change. Used it: @thoth in ocean-os is now @kimi-pi, with model meta kimi-k3, a Kimi-blue avatar tile (lobehub glyph rendered to match the tile family) and #1783ff brand color in both the CLI override map and the PWA fallbacks. Deployed 72271de2.
+_________________________________________________________________________________

@@ -13,6 +13,7 @@
 #   stitchpad invite --revoke <token>     revoke an invite token
 #   stitchpad start|stop|status|restart   manage the daemon (background)
 #   stitchpad roster                      print parsed roster
+#   stitchpad rename <old> <new>          rename a member everywhere local state knows them
 #   stitchpad who                         alias for roster
 #   stitchpad log [-n N]                  show recent history (git log)
 #
@@ -216,6 +217,62 @@ EOF
     sp_commit "roster: ~ $who wake=$wake target=$target"
     sp_unlock
     echo "✓ $who wake=$wake target=$target${adapter:+ adapter=$adapter}"
+    ;;
+
+  rename)
+    # Rename a roster member everywhere the local pad knows them: roster row,
+    # wake cursors, heartbeat, session bindings, sticky autonames, terminal
+    # locks, runtime/role/level meta. Pad HISTORY is untouched (append-only
+    # ledger); a system line announces the change instead.
+    #   stitchpad rename <old> <new>
+    sp_init_paths || exit 1
+    old="${1:?usage: stitchpad rename <old> <new>}"
+    new="${2:?usage: stitchpad rename <old> <new>}"
+    case "$new" in *[!a-zA-Z0-9_-]*) echo "stitchpad: bad name '$new' (allowed: a-z 0-9 _ -)" >&2; exit 1;; esac
+    sp_user_exists "$old" || { echo "stitchpad: @$old not in roster" >&2; exit 1; }
+    sp_user_exists "$new" && { echo "stitchpad: @$new already in roster" >&2; exit 1; }
+    # retire the old ticker BEFORE moving state (its exit trap deletes alive.<old>);
+    # remember whether it was live so we don't fake liveness for a dead agent.
+    _hb_live=0
+    _hlck="$PAD_STATE/heartbeat.$old.lock"
+    [ -d "$_hlck" ] && kill -0 "$(cat "$_hlck/pid" 2>/dev/null)" 2>/dev/null && _hb_live=1
+    "$BIN_DIR/stitchpad" heartbeat --stop "$old" >/dev/null 2>&1 || true
+    sp_lock || exit 1
+    tmp="$(mktemp)"
+    awk -v old="$old" -v new="$new" '
+      /^```roster/ { inblk=1; print; next }
+      inblk && /^```/ { inblk=0; print; next }
+      inblk && $0 !~ /^[[:space:]]*#/ {
+        line=$0; sub(/^[[:space:]]+/, "", line)
+        n=split(line, f, /[[:space:]]*\|[[:space:]]*/)
+        if (n >= 2 && f[1] == old) { out=new; for (i=2; i<=n; i++) out=out " | " f[i]; print out; next }
+      }
+      { print }
+    ' "$PAD_MD" > "$tmp" && mv "$tmp" "$PAD_MD"
+    # per-agent state files keyed by name
+    for _pfx in seen seen.relay count alive role level runtime forcewake dnd delivered_no_reply; do
+      [ -f "$PAD_STATE/$_pfx.$old" ] && mv "$PAD_STATE/$_pfx.$old" "$PAD_STATE/$_pfx.$new" 2>/dev/null
+    done
+    # session bindings + sticky autonames hold the NAME as file content
+    for _f in "$PAD_STATE"/sessions/* "$PAD_STATE"/autoname.*; do
+      [ -f "$_f" ] || continue
+      [ "$(tr -d '[:space:]' < "$_f" 2>/dev/null)" = "$old" ] && printf '%s' "$new" > "$_f"
+    done
+    # terminal-identity locks held by (this pad, old name)
+    for _f in "$SP_TERMDIR"/*; do
+      [ -f "$_f" ] || continue
+      IFS='|' read -r _lp _ln _lt < "$_f"
+      [ "$_lp" = "$PAD_DIR" ] && [ "$_ln" = "$old" ] && printf '%s|%s|%s' "$PAD_DIR" "$new" "$_lt" > "$_f"
+    done
+    sp_system "@$old is now @$new"
+    sp_commit "roster: ~ $old renamed to $new"
+    sp_unlock
+    if [ "$_hb_live" -eq 1 ]; then
+      STITCHPAD_NAME="$new" STITCHPAD_HEARTBEAT_PARENT_PID=0 \
+        "$BIN_DIR/stitchpad" heartbeat start "$new" >/dev/null 2>&1 || true
+    fi
+    echo "✓ @$old → @$new (roster, cursors, heartbeat, bindings, locks)"
+    echo "note: a live agent session/MCP started as @$old keeps its in-memory identity until restarted — hook-side identity follows the renamed binding immediately."
     ;;
 
   clear)
@@ -1183,6 +1240,8 @@ except: print("")' 2>/dev/null)"
       [pi]='#aeb8c4'           # pi monochrome silver
       [ocean]='#38bdf8'        # ocean waves blue (distinct from brand teal)
       [deepseek]='#4d6bfe'     # deepseek brand blue
+      [kimi-pi]='#1783ff'      # Kimi (Moonshot) brand blue — matches the K tile
+      [kimi]='#1783ff'         # Kimi brand blue
     )
 
     # 20-color palette (256-index → hex). Used when no override exists.
