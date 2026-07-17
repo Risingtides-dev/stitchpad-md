@@ -781,26 +781,45 @@ PY
 
   read)
     sp_init_paths || exit 1
-    # --new: DELTA read — only lines added since this agent's last read (per-
-    # identity cursor in .state/readpos.<name>). Kills the overlap tax where
-    # every wake re-reads a window that is 90% already in the agent's context.
-    # Falls back to the plain window when unidentified. Capped at 400 lines so
-    # a long-idle agent still can't flood itself.
+    # --new: DELTA read — the pad is GIT-VERSIONED (every write is a commit),
+    # so "unread" is precisely the diff since the commit this agent last read
+    # (.state/readref.<name>). Git handles mid-file rewrites (roster edits)
+    # that break line-number cursors, and an append-only pad diffs to pure
+    # additions. Capped at 400 lines; falls back to the tail window when
+    # unidentified or the pad has no git.
     if [ "${1:-}" = "--new" ]; then
       _me="$(sp_me)"
-      _total="$(wc -l < "$PAD_MD" | tr -d ' ')"
-      if [ -n "$_me" ]; then
-        _pos="$(cat "$PAD_STATE/readpos.$_me" 2>/dev/null || echo 0)"
-        case "$_pos" in ''|*[!0-9]*) _pos=0;; esac
-        [ "$_pos" -gt "$_total" ] && _pos=0   # pad was cleared/rotated
-        _delta=$(( _total - _pos ))
-        if [ "$_delta" -le 0 ]; then echo "(nothing new since your last read)"; exit 0; fi
-        [ "$_delta" -gt 400 ] && { echo "(…$(( _delta - 400 )) older unread lines skipped — 400-line cap)"; _pos=$(( _total - 400 )); }
-        tail -n "+$(( _pos + 1 ))" "$PAD_MD"
-        printf '%s' "$_total" > "$PAD_STATE/readpos.$_me"
+      _head="$(sgit rev-parse HEAD 2>/dev/null || true)"
+      if [ -n "$_me" ] && [ -n "$_head" ]; then
+        _ref="$(cat "$PAD_STATE/readref.$_me" 2>/dev/null || true)"
+        sgit cat-file -e "${_ref}^{commit}" 2>/dev/null || _ref=""
+        if [ "$_ref" = "$_head" ]; then echo "(nothing new since your last read)"; exit 0; fi
+        if [ -n "$_ref" ]; then
+          # added lines only, diff metadata stripped — reads as normal pad text
+          _out="$(sgit diff "$_ref..$_head" -- stitchpad.md 2>/dev/null | sed -n 's/^+\([^+].*\|$\)/\1/p')"
+        else
+          _out="$(tail -n 80 "$PAD_MD")"   # first read: bounded window, not history
+        fi
+        _cnt="$(printf '%s\n' "$_out" | wc -l | tr -d ' ')"
+        if [ "$_cnt" -gt 400 ]; then
+          echo "(…$(( _cnt - 400 )) older unread lines skipped — 400-line cap)"
+          _out="$(printf '%s\n' "$_out" | tail -n 400)"
+        fi
+        printf '%s\n' "$_out"
+        printf '%s' "$_head" > "$PAD_STATE/readref.$_me"
         exit 0
       fi
       tail -n 80 "$PAD_MD"; exit 0
+    fi
+    # --range A-B: chapter-style read of an exact line span (cheap permalink:
+    # cite regions as [1443-1565] and anyone can pull just that slice)
+    if [ "${1:-}" = "--range" ]; then
+      _r="${2:?usage: stitchpad read --range <start>-<end>}"
+      _a="${_r%%-*}"; _b="${_r##*-}"
+      case "$_a$_b" in *[!0-9]*) echo "stitchpad: bad range '$_r' (want e.g. 1443-1565)" >&2; exit 1;; esac
+      [ $(( _b - _a )) -gt 600 ] && _b=$(( _a + 600 ))   # cap: no flood via range
+      sed -n "${_a},${_b}p" "$PAD_MD"
+      exit 0
     fi
     n=80; [ "${1:-}" = "-n" ] && n="$2"
     tail -n "$n" "$PAD_MD"

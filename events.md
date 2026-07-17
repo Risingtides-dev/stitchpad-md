@@ -669,3 +669,10 @@ area:      [infra]
 
 Context-flood audit + fixes. What already protected agents: wakes are one ~200-char line (snippet, never the transcript), reads are pull-based tail windows (MCP read = last 80 lines), DMs inject single messages, and the seen-cursor wake-once gate stops repeat wakes per mention. Two leaks closed: (1) the wake line literally said "read .stitchpad/stitchpad.md for full context" — an invitation to cat the whole 319KB pad every wake (the ocean 1.58B-token burn class); it now prescribes `stitchpad read --new` / `read -n 40` and forbids the raw cat. (2) window overlap tax — every wake re-read ~90% already-seen lines; new `stitchpad read --new` is a per-identity DELTA read (.state/readpos.<name> cursor, 400-line cap for long-idle agents, cleared-pad safe, falls back to the window when unidentified). Verified: first --new returns unread, second returns "(nothing new)".
 _________________________________________________________________________________
+time:      [04:07] [07-17-26]
+agent:     [claude] [fable 5]
+type:      [refactor]
+area:      [infra]
+
+Delta reads rebuilt on git, per smaths' observation that the pad is already versioned: read --new now diffs from the commit ref this agent last read (.state/readref.<name>) instead of a line-count cursor — immune to mid-file roster rewrites, append-only diffs read as clean pad text, 400-line cap, safe across pad clears, window fallback when unidentified. Added read --range A-B (chapter-style slice, 600-line cap) so regions can be cited as [1443-1565] and pulled exactly. Verified live on the active pad: delta returns only new commits, immediate re-read returns nothing-new, range returns the exact span.
+_________________________________________________________________________________
