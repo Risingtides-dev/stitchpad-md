@@ -158,6 +158,29 @@ button{font:inherit}
 .sum-panel .x:hover{color:var(--txt);background:var(--panel)}
 .sum-panel .body{font-size:13.5px;line-height:1.55;white-space:pre-wrap;color:#d3d8de}
 
+/* ── delivery receipts + doctor ── */
+.receipt{margin-top:3px;font-size:11px;color:var(--dim);letter-spacing:.02em}
+.receipt.ok{color:#3fb950}
+.receipt.bad{color:var(--err)}
+#docbtn{margin-left:auto;display:flex;align-items:center;gap:6px;background:transparent;border:1px solid var(--paper-edge);border-radius:9px;color:var(--ink-dim);font-size:13px;font-weight:600;padding:5px 10px;cursor:pointer;transition:background .15s var(--ease),color .15s var(--ease)}
+#docbtn:hover{background:var(--paper-3);color:var(--accent-ink)}
+#docbtn + #sumbtn{margin-left:8px}
+@media(max-width:560px){#docbtn .lbl{display:none}}
+.doc-panel .body{white-space:normal}
+.doc-row{display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-bottom:1px solid var(--edge)}
+.doc-row:last-of-type{border-bottom:0}
+.doc-main{flex:1;min-width:0}
+.doc-name{display:flex;align-items:baseline;gap:8px;font-size:13.5px}
+.doc-sub{color:var(--dim);font-size:11.5px}
+.doc-chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}
+.doc-chips .chip{background:var(--panel);border:1px solid var(--edge);border-radius:6px;padding:2px 8px;font-size:11.5px;color:var(--dim)}
+.doc-chips .chip.ok{color:#3fb950;border-color:rgba(63,185,80,.35)}
+.doc-chips .chip.warn{color:#d29922;border-color:rgba(210,153,34,.35)}
+.doc-chips .chip.bad{color:var(--err);border-color:rgba(248,81,73,.4)}
+.doc-foot{margin-top:9px;font-size:11.5px;color:var(--dim)}
+.doc-foot.bad{color:var(--err)}
+.doc-empty{color:var(--dim);font-size:13px;padding:8px 0}
+
 /* ── login ── */
 #login{position:fixed;inset:0;background:var(--col);display:none;flex-direction:column;align-items:center;justify-content:center;z-index:var(--z-login);gap:12px;padding:24px}
 #login::before{content:"";position:absolute;inset:0;background:radial-gradient(520px 340px at 50% 34%,rgba(13,148,136,.13),transparent 70%);pointer-events:none}

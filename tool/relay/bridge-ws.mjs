@@ -158,6 +158,18 @@ async function onTerm(p, msg) {
 // commands that open interactive dialogs/pickers — dead ends from a phone
 const MODAL_CMDS = new Set(["status", "config", "permissions", "help", "doctor", "login", "logout", "exit", "quit", "vim", "hooks", "mcp", "agents", "resume", "theme", "terminal-setup", "install-github-app", "ide", "bug"]);
 const OCEAN_URL = process.env.OCEAN_DAEMON_URL || "http://127.0.0.1:4780";
+// delivery receipts: report each DM's outcome back to the relay (stamps the
+// pair-log entry + pushes a live {type:"dmstatus"} to the phone) and remember
+// the last outcome per agent for the doctor snapshot.
+const LAST_DM = {};   // "<pad>:<agent>" → {at, status, detail}
+async function dmStatus(p, msg, status, detail) {
+  LAST_DM[`${p.name}:${msg.to}`] = { at: Date.now(), status, detail };
+  if (!msg.id) return;
+  await api(`/dm-status?pad=${encodeURIComponent(p.name)}`, {
+    method: "POST",
+    body: JSON.stringify({ id: msg.id, from: msg.from, to: msg.to, status, detail }),
+  }).catch(() => {});
+}
 async function onDm(p, msg) {
   const { from, to, text } = msg;
   if (!to || !text) return;
@@ -175,7 +187,7 @@ async function onDm(p, msg) {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ session_id: row[3], prompt, cwd: p.proj, client_type: "stitchpad" }),
       });
-      if (r.ok) { log(p.name, `DM @${from} → @${to} ocean daemon turn (${text.slice(0, 40)})`); return; }
+      if (r.ok) { log(p.name, `DM @${from} → @${to} ocean daemon turn (${text.slice(0, 40)})`); await dmStatus(p, msg, "delivered", "daemon session"); return; }
       log(p.name, `DM @${from} → @${to} daemon POST ${r.status} — falling back`);
     }
   } catch {}
@@ -190,6 +202,7 @@ async function onDm(p, msg) {
       const cmd = (clean.match(/^\/([a-zA-Z0-9_:-]+)/) || [])[1]?.toLowerCase();
       if (cmd && MODAL_CMDS.has(cmd)) {
         log(p.name, `DM @${from} → @${to} refused modal /${cmd}`);
+        await dmStatus(p, msg, "refused", `/${cmd} is interactive-only`);
         await api(`/dm-in?pad=${encodeURIComponent(p.name)}`, { method: "POST", body: JSON.stringify({ from: to, to: from, text: `⚠ /${cmd} opens a dialog only a keyboard can close — not sent. Commands that work from here: /compact, /clear, /model <name>, or any skill.`, at: Date.now() }) }).catch(() => {});
         return;
       }
@@ -209,10 +222,13 @@ async function onDm(p, msg) {
       if (delivered && cmd) log(p.name, `DM @${from} → @${to} slash /${cmd} injected raw`);
     }
   }
-  if (delivered) log(p.name, `DM @${from} → @${to} terminal (${text.slice(0, 40)})`);
-  else {
+  if (delivered) {
+    log(p.name, `DM @${from} → @${to} terminal (${text.slice(0, 40)})`);
+    await dmStatus(p, msg, "delivered", "terminal");
+  } else {
     await sh(SP, ["say", `@${to} (dm — terminal unreachable) ${text}`], { cwd: p.proj, env: { ...process.env, STITCHPAD_NAME: from || "smaths" } });
     log(p.name, `DM @${from} → @${to} FELL BACK to pad (no live pane)`);
+    await dmStatus(p, msg, "failed", "terminal unreachable — posted on the pad instead");
     pushPad(p, "dm-fallback");
   }
 }
@@ -316,6 +332,66 @@ async function drainDmOut(p) {
     } catch (e) { log(p.name, "dm-in forward failed:", e.message); }
   }
 }
+
+// DOCTOR: the pad's health snapshot, pushed every 30s so the phone can show
+// per-agent vitals — heartbeat freshness, wake gate, terminal lock, last
+// wake/DM outcome — instead of the operator diagnosing by vibes.
+function lastWakeFor(p, name) {
+  // adapter logs are the delivery ground truth; scan the tails
+  let best = null;
+  for (const f of ["adapter.herdr.log", "adapter.velocity.log", "adapter.codex.log"]) {
+    let raw; try { raw = readFileSync(join(p.padd, ".state", f), "utf8"); } catch { continue; }
+    const lines = raw.trimEnd().split("\n").slice(-200);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const l = lines[i];
+      if (!l.includes(`@${name}`)) continue;
+      const ts = (l.match(/^\[([^\]]+)\]/) || [])[1] || "";
+      if (l.includes(`delivered wake to @${name}`)) { best = best || { at: ts, ok: true }; break; }
+      if (l.includes("CROSS-PAD BLOCKED") || l.includes("failed")) { best = best || { at: ts, ok: false, why: l.includes("CROSS-PAD") ? "cross-pad blocked" : "delivery failed" }; break; }
+    }
+    if (best) break;
+  }
+  return best;
+}
+async function buildDoctor(p) {
+  let roster;
+  try { roster = (await sh(SP, ["roster"], { cwd: p.proj })).stdout; } catch { return null; }
+  const agents = [];
+  for (const line of roster.split("\n")) {
+    const [name, adapter, wake, target] = line.split("|").map(s => (s || "").trim());
+    if (!name) continue;
+    const a = { name, adapter, wake: wake || "-", target: target || "-" };
+    try {
+      const hb = JSON.parse(readFileSync(join(p.padd, ".state", "alive." + name), "utf8"));
+      a.hb_age = Math.max(0, Math.round(Date.now() / 1000 - (hb.ts || 0)));
+    } catch { a.hb_age = -1; }   // -1 = no heartbeat file
+    if (target && target !== "-" && adapter !== "ocean") {
+      try {
+        const surface = target.split("@@").pop();
+        const [lpad, lname, lts] = readFileSync(join(HOME, ".stitchpad-terminals", surface), "utf8").trim().split("|");
+        const fresh = Date.now() / 1000 - (+lts || 0) < 300;
+        a.lock = !fresh ? "stale" : (lpad === p.padd && lname === name) ? "ok"
+          : lname === "operator" ? "OPERATOR TERMINAL" : `CONFLICT: @${lname} in ${lpad.split("/").slice(-2, -1)[0]}`;
+      } catch { a.lock = "unclaimed"; }
+    }
+    try {
+      const { stdout } = await sh(SP, ["wake", name, "--peek-ordinal"], { cwd: p.proj });
+      a.gate = stdout.trim() ? "owes a reply" : "idle";
+    } catch { a.gate = "?"; }
+    const w = lastWakeFor(p, name);
+    if (w) a.last_wake = w;
+    const d = LAST_DM[`${p.name}:${name}`];
+    if (d) a.last_dm = { status: d.status, detail: d.detail, ago: Math.round((Date.now() - d.at) / 1000) };
+    agents.push(a);
+  }
+  return { pad: p.name, at: Date.now(), bridge: "ws", agents };
+}
+async function pushDoctor(p) {
+  const doc = await buildDoctor(p);
+  if (!doc) return;
+  await api(`/doctor-in?pad=${encodeURIComponent(p.name)}`, { method: "POST", body: JSON.stringify(doc) }).catch(() => {});
+}
+setInterval(() => pads.forEach(pushDoctor), 30000);
 
 // AUTO-HEAL roster wake targets: the roster row is written ONCE (at join or a
 // manual set-wake) while terminals churn constantly, so its pane pointer rots.

@@ -634,3 +634,10 @@ area:      [infra]
 
 Codex wakes were landing in the operator terminal — my own bug, two-step: sp_this_surface() captured the CALLER's pane, but heartbeats are routinely started on an agent's behalf from other contexts (watcher, wake adapter cold-start, operator shell), so alive.codex got stamped with foreign terminals; auto-heal then faithfully wrote the garbage heartbeat surface into the roster and codex's wakes followed it to the operator pane (ocean-os pi flapped the same way). Fix: heartbeat surface priority is now ROSTER TARGET first (authoritative — where wakes actually go), caller-pane only as fallback for target-less agents, in both heartbeat start and --touch. Repaired state: codex → term_656b30a4, ocean-os pi → term_656b80ea, heartbeats restarted clean, seen.codex reset so the missed @ocean v2.1/v2.2 wakes re-fire. The operator terminal now carries a permanent non-expiring operator lock (~/.stitchpad-terminals) that claim/heal/wake/DM all refuse, so no path can ever bind an agent to it again.
 _________________________________________________________________________________
+time:      [20:59] [07-16-26]
+agent:     [claude] [fable 5]
+type:      [feature-request]
+area:      [frontend]
+
+Delivery receipts + doctor screen (the "see for yourself" pair). Receipts: /dm mints an id; the bridge reports each outcome on /dm-status (delivered terminal/daemon, refused modal, failed → pad fallback); the DO stamps the pair-log entry and broadcasts {dmstatus}; the phone shows ✓✓/⛔/⚠ under your own bubbles — in session-chat DM panes, undelivered sends surface as bubbles so a dead delivery is visible instead of silently missing. Doctor: bridge pushes a 30s health snapshot per pad (heartbeat age, wake gate owes-reply/idle, terminal-lock ok/conflict/operator, last wake + last DM outcome) to /doctor-in; ♥ vitals button in the top bar opens the panel, live over WS, with a bridge-staleness footer that reddens past 90s. Wire-verified: receipts stamped (delivered·terminal, refused·interactive-only) on real DMs to fable.
+_________________________________________________________________________________

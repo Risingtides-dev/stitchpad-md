@@ -101,6 +101,21 @@ export class PadHub {
         this.broadcast("client", JSON.stringify({ type: "dm", pad, msg }));
         if (kind === "dm-in") return json({ delivered: true });   // inbound: no bridge hop
       }
+      // delivery receipt: stamp the pair-log entry by id + fan out live
+      if (kind === "dm-status") {
+        const pair = [msg.from, msg.to].sort().join("~");
+        const log = (await this.ctx.storage.get("dm:" + pair)) || [];
+        const e = log.find(x => x.id === msg.id);
+        if (e) { e.status = msg.status; e.detail = msg.detail || ""; await this.ctx.storage.put("dm:" + pair, log); }
+        this.broadcast("client", JSON.stringify({ type: "dmstatus", pad, id: msg.id, status: msg.status, detail: msg.detail || "", from: msg.from, to: msg.to }));
+        return json({ delivered: true });
+      }
+      // pad health snapshot from the bridge → store + fan out
+      if (kind === "doctor-in") {
+        await this.ctx.storage.put("doctor", msg);
+        this.broadcast("client", JSON.stringify({ type: "doctor", pad, data: msg }));
+        return json({ delivered: true });
+      }
       // bridge posting back a finished thread summary → store + fan out
       if (kind === "summary-in") {
         await this.ctx.storage.put("summary", msg);
@@ -132,6 +147,10 @@ export class PadHub {
     // last stored terminal capture for ?agent=
     if (url.pathname === "/term" && req.method === "GET") {
       return json((await this.ctx.storage.get("term:" + (url.searchParams.get("agent") || ""))) || null);
+    }
+    // last stored health snapshot
+    if (url.pathname === "/doctor" && req.method === "GET") {
+      return json((await this.ctx.storage.get("doctor")) || null);
     }
 
     return json({ error: "not found" }, 404);
@@ -196,7 +215,7 @@ export default {
     }
 
     // Non-API paths → serve the PWA static assets (index.html, manifest).
-    const API = ["/login", "/join-request", "/invite", "/pads", "/pad", "/pad.colors", "/push", "/say", "/outbox", "/dm", "/dmbox", "/dm-in", "/dmlog", "/summarize", "/summary-in", "/summary", "/term", "/term-in", "/upload-image", "/upload-file", "/filebox", "/ws"];
+    const API = ["/login", "/join-request", "/invite", "/pads", "/pad", "/pad.colors", "/push", "/say", "/outbox", "/dm", "/dmbox", "/dm-in", "/dm-status", "/dmlog", "/summarize", "/summary-in", "/summary", "/term", "/term-in", "/doctor", "/doctor-in", "/upload-image", "/upload-file", "/filebox", "/ws"];
     if (!API.includes(url.pathname) && !url.pathname.startsWith("/img/") && !url.pathname.startsWith("/f/")) {
       return env.ASSETS ? env.ASSETS.fetch(req) : json({ error: "no assets" }, 404);
     }
@@ -245,8 +264,21 @@ export default {
     if (!pad) return json({ error: "missing ?pad=NAME" }, 400);
 
     // realtime hot path → the pad's Durable Object
-    if (url.pathname === "/ws" || url.pathname === "/push" || url.pathname === "/pad" || url.pathname === "/pad.colors" || url.pathname === "/dmlog" || url.pathname === "/summary" || (url.pathname === "/term" && req.method === "GET")) {
+    if (url.pathname === "/ws" || url.pathname === "/push" || url.pathname === "/pad" || url.pathname === "/pad.colors" || url.pathname === "/dmlog" || url.pathname === "/summary" || (url.pathname === "/doctor" && req.method === "GET") || (url.pathname === "/term" && req.method === "GET")) {
       return hub(env, pad).fetch(req);
+    }
+    // bridge reporting a DM's delivery outcome → pair-log update + live receipt
+    if (url.pathname === "/dm-status" && req.method === "POST") {
+      const body = await req.json();
+      if (!body.id) return json({ error: "need id" }, 400);
+      await hub(env, pad).fetch(`https://hub/deliver?pad=${encodeURIComponent(pad)}`, { method: "POST", body: JSON.stringify({ kind: "dm-status", msg: body }) });
+      return json({ ok: true });
+    }
+    // bridge posting the pad's health snapshot → stored + fanned out live
+    if (url.pathname === "/doctor-in" && req.method === "POST") {
+      const body = await req.json();
+      await hub(env, pad).fetch(`https://hub/deliver?pad=${encodeURIComponent(pad)}`, { method: "POST", body: JSON.stringify({ kind: "doctor-in", msg: body }) });
+      return json({ ok: true });
     }
     // agent → human DM (bridge forwards `stitchpad dm` output): record + broadcast
     if (url.pathname === "/dm-in" && req.method === "POST") {
@@ -304,13 +336,15 @@ export default {
     if (url.pathname === "/dm" && req.method === "POST") {
       const { from, to, text } = await req.json();
       if (!to || !text) return json({ error: "need to + text" }, 400);
-      const msg = { from: from || "smaths", to, text, at: Date.now() };
-      if (await tryDeliver(env, pad, "dm", msg)) return json({ ok: true, delivered: "ws" });
+      // id = the delivery-receipt key: the bridge reports the outcome on
+      // /dm-status with it, and the phone anchors the receipt to the bubble.
+      const msg = { from: from || "smaths", to, text, at: Date.now(), id: crypto.randomUUID().slice(0, 8) };
+      if (await tryDeliver(env, pad, "dm", msg)) return json({ ok: true, delivered: "ws", id: msg.id });
       const qk = `dmbox:${pad}`;
       const q = JSON.parse((await env.STITCHPAD.get(qk)) || "[]");
       q.push(msg);
       await env.STITCHPAD.put(qk, JSON.stringify(q));
-      return json({ ok: true, queued: q.length });
+      return json({ ok: true, queued: q.length, id: msg.id });
     }
     if (url.pathname === "/dmbox" && req.method === "GET") {
       const qk = `dmbox:${pad}`;

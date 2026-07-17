@@ -61,6 +61,7 @@ const store = {
   dmWith: localStorage.getItem("sp_dm") || "",
   pads: [], doc: null, blocks: null, pending: [], notices: [], dmlogs: {},
   summary: null, summaryOpen: false, summarizing: false,
+  doctor: null, doctorOpen: false,
   dmView: "chat", terms: {},
   authed: false, loginErr: "",
 };
@@ -151,6 +152,18 @@ function connectWS() {
       store.terms = { ...store.terms, [m.data.agent]: m.data }; publish();
       if (stickAfter) requestAnimationFrame(() => stick());
     }
+    if (m.type === "dmstatus" && m.id && myPad === store.pad) {
+      // delivery receipt: stamp the matching bubble, no scroll movement
+      const peer = (m.from || "").toLowerCase() === store.me.toLowerCase() ? m.to : m.from;
+      const cur = store.dmlogs[peer];
+      if (cur) {
+        store.dmlogs = { ...store.dmlogs, [peer]: cur.map(x => x.id === m.id ? { ...x, status: m.status, detail: m.detail } : x) };
+        publish();
+      }
+    }
+    if (m.type === "doctor" && m.data && myPad === store.pad) {
+      store.doctor = m.data; publish();
+    }
     if (m.type === "summary" && m.data && myPad === store.pad) {
       store.summary = m.data; store.summaryOpen = true; store.summarizing = false; publish();
       // notify even if he's off in another app — that's the point of the button
@@ -195,6 +208,11 @@ async function loadDmLog(peer) {
 function pushDm(msg) {
   const peer = (msg.from || "").toLowerCase() === store.me.toLowerCase() ? msg.to : msg.from;
   const cur = store.dmlogs[peer] || [];
+  // id match (receipt-carrying echo) → merge into the optimistic bubble
+  if (msg.id && cur.some(m => m.id === msg.id)) {
+    store.dmlogs = { ...store.dmlogs, [peer]: cur.map(m => m.id === msg.id ? { ...m, ...msg, status: m.status || msg.status } : m) };
+    publish(); return;
+  }
   // the ws echo carries the SERVER timestamp — dedupe on from+text within a
   // 15s window (not exact at), else the optimistic add doubles on screen
   if (cur.some(m => m.from === msg.from && m.text === msg.text && Math.abs((m.at || 0) - (msg.at || 0)) < 15000)) return;
@@ -272,7 +290,8 @@ async function sendText(text) {
     try {
       const r = await api("/dm?pad=" + encodeURIComponent(store.pad), { method: "POST", body: JSON.stringify({ from: store.me, to, text }) });
       if (!r.ok) throw new Error("HTTP " + r.status);
-      pushDm({ from: store.me, to, text, at: Date.now() });
+      const j = await r.json().catch(() => ({}));
+      pushDm({ from: store.me, to, text, at: Date.now(), id: j.id, status: "sent" });
       if (/^\/[a-zA-Z0-9_:-]+/.test(text)) notice("⚡ running " + text.split(/\s/)[0] + " in @" + to + "'s terminal");
       return { ok: true };
     } catch (err) {
@@ -292,6 +311,12 @@ async function sendText(text) {
     notice("⚠ send failed (" + err.message + ") — your text is back in the box, press send to retry", true);
     return { ok: false, text };
   }
+}
+async function openDoctor() {
+  store.doctorOpen = !store.doctorOpen; publish();
+  if (!store.doctorOpen) return;
+  const r = await api("/doctor?pad=" + encodeURIComponent(store.pad)).catch(() => null);
+  if (r && r.ok) { store.doctor = await r.json(); publish(); }
 }
 async function requestSummary() {
   if (store.summarizing || !store.pad) return;
@@ -420,9 +445,17 @@ function Row({ b, grouped, enter }) {
 function DmRow({ dm }) {
   const mine = (dm.from || "").toLowerCase() === store.me.toLowerCase();
   const t = new Date(dm.at), hh = String(t.getHours()).padStart(2, "0"), mm = String(t.getMinutes()).padStart(2, "0");
+  // delivery receipt — only on my own bubbles, only when we know something
+  const rc = mine && dm.status
+    ? dm.status === "delivered" ? { c: "ok", t: "✓✓ " + (dm.detail || "delivered") }
+    : dm.status === "refused" ? { c: "bad", t: "⛔ " + (dm.detail || "refused") }
+    : dm.status === "failed" ? { c: "bad", t: "⚠ " + (dm.detail || "failed") }
+    : { c: "", t: "✓ sent" }
+    : null;
   return html`<div class=${"row" + (mine ? " dmrow" : "")}><${Av} n=${dm.from} trigger=${!mine}/><div class="bubble">
     <div class="hd"><span class=${"who" + (mine ? "" : " card-trigger")} data-agent=${dm.from} style=${{ color: nameColor(dm.from) }}>${dm.from}</span><span class="ts">${hh}:${mm}</span></div>
     <div class="bd" dangerouslySetInnerHTML=${{ __html: fmt(dm.text) }}></div>
+    ${rc && html`<div class=${"receipt " + rc.c}>${rc.t}</div>`}
   </div></div>`;
 }
 
@@ -456,8 +489,14 @@ function Log() {
     const t = s.terms[s.dmWith];
     if (t && Array.isArray(t.msgs)) {
       items = t.msgs.map(m => ({ key: "x" + m.at + djb2((m.role || "") + (m.text || "").slice(0, 60)), sess: m }));
+      // receipts live on the DM log, not the transcript: surface my recent
+      // sends that HAVEN'T landed in the session yet (sent/refused/failed) so
+      // a dead delivery is visible instead of silently missing.
+      const tail = (s.dmlogs[s.dmWith] || []).filter(m => m.id && m.status && m.status !== "delivered"
+        && (m.from || "").toLowerCase() === s.me.toLowerCase() && Date.now() - (m.at || 0) < 600000);
+      items = items.concat(tail.map(m => ({ key: "d" + m.id, dm: m })));
     } else {
-      items = (s.dmlogs[s.dmWith] || []).map(m => ({ key: "d" + m.at + djb2((m.from || "") + (m.text || "")), dm: m }));
+      items = (s.dmlogs[s.dmWith] || []).map(m => ({ key: "d" + (m.id || m.at + djb2((m.from || "") + (m.text || ""))), dm: m }));
     }
   } else if (s.blocks) {
     const msgs = s.blocks;
@@ -635,6 +674,38 @@ function Composer() {
   </div>`;
 }
 
+// ── doctor: the pad's vitals, straight from the bridge ───────
+const fmtAge = s => s < 0 ? "none" : s < 90 ? s + "s" : s < 5400 ? Math.round(s / 60) + "m" : Math.round(s / 3600) + "h";
+function DoctorPanel() {
+  const s = useStore();
+  const d = s.doctor;
+  const stale = d ? Math.round((Date.now() - d.at) / 1000) : -1;
+  return html`<div class="sum-panel doc-panel">
+    <h3>♥ Pad vitals <span class="sub">#${s.pad}</span><button class="x" aria-label="close" onClick=${() => { store.doctorOpen = false; publish(); }}>✕</button></h3>
+    <div class="body">
+      ${!d && html`<div class="doc-empty">no snapshot yet — the bridge reports every 30s</div>`}
+      ${d && d.agents.map(a => {
+        const hbBad = a.hb_age < 0 || a.hb_age > 120;
+        const lockBad = a.lock && a.lock !== "ok" && a.lock !== "stale" && a.lock !== "unclaimed";
+        return html`<div key=${a.name} class="doc-row">
+          <${Av} n=${a.name} trigger=${false}/>
+          <div class="doc-main">
+            <div class="doc-name"><b style=${{ color: nameColor(a.name) }}>@${a.name}</b><span class="doc-sub">${a.adapter} · ${a.wake}</span></div>
+            <div class="doc-chips">
+              <span class=${"chip " + (hbBad ? "bad" : "ok")}>♥ ${fmtAge(a.hb_age)}</span>
+              <span class=${"chip " + (a.gate === "owes a reply" ? "warn" : "")}>${a.gate}</span>
+              ${a.lock && html`<span class=${"chip " + (lockBad ? "bad" : "")}>${a.lock === "ok" ? "lock ✓" : a.lock}</span>`}
+              ${a.last_wake && html`<span class=${"chip " + (a.last_wake.ok ? "" : "bad")}>wake ${a.last_wake.ok ? "✓ " + a.last_wake.at.slice(11, 16) : "✗ " + (a.last_wake.why || "")}</span>`}
+              ${a.last_dm && html`<span class=${"chip " + (a.last_dm.status === "delivered" ? "" : "bad")}>dm ${a.last_dm.status === "delivered" ? "✓✓" : "✗"} ${fmtAge(a.last_dm.ago)} ago</span>`}
+            </div>
+          </div>
+        </div>`;
+      })}
+      ${d && html`<div class=${"doc-foot" + (stale > 90 ? " bad" : "")}>bridge report ${fmtAge(stale)} ago${stale > 90 ? " — bridge may be down" : ""}</div>`}
+    </div>
+  </div>`;
+}
+
 function App() {
   const s = useStore();
   const [drawer, setDrawer] = useState(false);
@@ -650,12 +721,14 @@ function App() {
         <button id="hamb" aria-label="channels" onClick=${() => setDrawer(!drawer)}>☰</button>
         <span class="name">${s.dmWith ? "@" + s.dmWith : "# " + (s.pad || "…")}</span>
         ${!s.dmWith && html`<span class="meta">${s.doc ? members + " members" : ""}</span>`}
+        ${!s.dmWith && html`<button id="docbtn" title="pad vitals — heartbeats, wakes, locks, deliveries" onClick=${openDoctor}>♥<span class="lbl">vitals</span></button>`}
         ${!s.dmWith && html`<button id="sumbtn" title="summarize this thread" disabled=${s.summarizing} onClick=${requestSummary}>${s.summarizing ? "…" : "✨"}<span class="lbl">${s.summarizing ? "summarizing" : "summarize"}</span></button>`}
       </div>
       <${StatusBar}/>
       <${ClaimBar}/>
       <${Log}/>
       <${Composer}/>
+      ${s.doctorOpen && html`<${DoctorPanel}/>`}
       ${s.summaryOpen && s.summary && html`<div class="sum-panel">
         <h3>✨ Thread summary <span class="sub">#${s.pad}</span><button class="x" aria-label="close" onClick=${() => { store.summaryOpen = false; publish(); }}>✕</button></h3>
         <div class="body">${s.summary.error ? "⚠ " + s.summary.error : s.summary.text}</div>
