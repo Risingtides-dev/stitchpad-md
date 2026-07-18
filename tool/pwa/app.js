@@ -39,6 +39,36 @@ function fmt(t) {
   t = t.replace(/(^|[\s(])@([a-zA-Z0-9_-]+)/g, (m, p, n) => `${p}<b style="color:${colorFor(n)}">@${n}</b>`);
   return t;
 }
+function fmtMd(t) {
+  // Block-level markdown for LLM output (thread summaries): headings, lists,
+  // quotes, hr, code fences, paragraphs. Inline styling mirrors fmt().
+  t = esc(t || "");
+  const codes = [];
+  t = t.replace(/```(?:[a-zA-Z0-9_-]*\n)?([\s\S]*?)```/g, (m, c) => { codes.push(c.replace(/\s+$/, "")); return "\u0000" + (codes.length - 1) + "\u0000"; });
+  const inline = s => s
+    .replace(/\u0000(\d+)\u0000/g, (m, i) => `<code>${codes[+i]}</code>`)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/(^|[\s(])\*([^*\n]+)\*(?=$|[\s).,;:!?])/g, "$1<i>$2</i>")
+    .replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>')
+    .replace(/(^|[\s(])@([a-zA-Z0-9_-]+)/g, (m, p, n) => `${p}<b style="color:${colorFor(n)}">@${n}</b>`);
+  const out = []; let list = null, para = [];
+  const endList = () => { if (list) { out.push(`<${list.t}>${list.i.map(x => `<li>${x}</li>`).join("")}</${list.t}>`); list = null; } };
+  const endPara = () => { if (para.length) { out.push(`<p>${para.join(" ")}</p>`); para = []; } };
+  for (const raw of t.split("\n")) {
+    const l = raw.trim(); let m;
+    if (!l) { endPara(); endList(); continue; }
+    if ((m = l.match(/^\u0000(\d+)\u0000$/))) { endPara(); endList(); out.push(`<div class="cb"><button class="cpy" title="copy">copy</button><pre>${codes[+m[1]]}</pre></div>`); continue; }
+    if ((m = l.match(/^(#{1,6})\s+(.*)$/))) { endPara(); endList(); out.push(`<div class="md-h md-h${Math.min(m[1].length, 3)}">${inline(m[2])}</div>`); continue; }
+    if ((m = l.match(/^[-*•]\s+(.*)$/))) { endPara(); if (!list || list.t !== "ul") { endList(); list = { t: "ul", i: [] }; } list.i.push(inline(m[1])); continue; }
+    if ((m = l.match(/^\d+[.)]\s+(.*)$/))) { endPara(); if (!list || list.t !== "ol") { endList(); list = { t: "ol", i: [] }; } list.i.push(inline(m[1])); continue; }
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(l)) { endPara(); endList(); out.push("<hr>"); continue; }
+    if ((m = l.match(/^&gt;\s?(.*)$/))) { endPara(); endList(); out.push(`<blockquote>${inline(m[1])}</blockquote>`); continue; }
+    endList(); para.push(inline(l));
+  }
+  endPara(); endList();
+  return out.join("");
+}
 function parse(md) {
   const out = []; let cur = null;
   for (const line of (md || "").split("\n")) {
@@ -338,7 +368,7 @@ async function requestSummary() {
   try {
     const r = await api("/summarize?pad=" + encodeURIComponent(store.pad), { method: "POST", body: JSON.stringify({ by: store.me }) });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "HTTP " + r.status);
-    notice("✨ summarizing the thread — I'll pop it up here (and notify you) when it's ready");
+    notice("🧵 summarizing the thread — I'll pop it up here (and notify you) when it's ready");
   } catch (err) {
     store.summarizing = false; publish();
     notice("⚠ summarize failed: " + err.message, true);
@@ -735,7 +765,7 @@ function App() {
         <span class="name">${s.dmWith ? "@" + s.dmWith : "# " + (s.pad || "…")}</span>
         ${!s.dmWith && html`<span class="meta">${s.doc ? members + " members" : ""}</span>`}
         ${!s.dmWith && html`<button id="docbtn" title="pad vitals — heartbeats, wakes, locks, deliveries" onClick=${openDoctor}>♥<span class="lbl">vitals</span></button>`}
-        ${!s.dmWith && html`<button id="sumbtn" title="summarize this thread" disabled=${s.summarizing} onClick=${requestSummary}>${s.summarizing ? "…" : "✨"}<span class="lbl">${s.summarizing ? "summarizing" : "summarize"}</span></button>`}
+        ${!s.dmWith && html`<button id="sumbtn" title="summarize this thread" disabled=${s.summarizing} onClick=${requestSummary}>${s.summarizing ? "…" : "🧵"}<span class="lbl">${s.summarizing ? "summarizing" : "summarize"}</span></button>`}
       </div>
       <${StatusBar}/>
       <${ClaimBar}/>
@@ -743,8 +773,10 @@ function App() {
       <${Composer}/>
       ${s.doctorOpen && html`<${DoctorPanel}/>`}
       ${s.summaryOpen && s.summary && html`<div class="sum-panel">
-        <h3>✨ Thread summary <span class="sub">#${s.pad}</span><button class="x" aria-label="close" onClick=${() => { store.summaryOpen = false; publish(); }}>✕</button></h3>
-        <div class="body">${s.summary.error ? "⚠ " + s.summary.error : s.summary.text}</div>
+        <h3>🧵 Thread summary <span class="sub">#${s.pad}</span><button class="x" aria-label="close" onClick=${() => { store.summaryOpen = false; publish(); }}>✕</button></h3>
+        ${s.summary.error
+          ? html`<div class="body">⚠ ${s.summary.error}</div>`
+          : html`<div class="body md" dangerouslySetInnerHTML=${{ __html: fmtMd(s.summary.text) }}></div>`}
       </div>`}
     </div>
   </div>`;
