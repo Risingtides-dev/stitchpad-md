@@ -63,6 +63,10 @@ print(json.dumps(skills))
     [ -z "$_skills" ] && _skills='[]'
   fi
   _adapter="$(echo "[$roster]" | jq -r '.[] | select(.name=="'"$_name"'") | .adapter // ""' 2>/dev/null || echo '')"
+  # herdr is a pane wrapper, not a harness — the runtime marker (claude/pi/codex)
+  # is the agent's real identity for logos, colors, and slash capability
+  _runtime="$(cat "$padd/.state/runtime.$_name" 2>/dev/null || echo '')"
+  [ -n "$_runtime" ] && _adapter="$_runtime"
   _status="available"
   if [ -f "$padd/.state/dnd.$_name" ]; then
     _status="dnd"
