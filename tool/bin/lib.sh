@@ -239,10 +239,14 @@ sp_tasks() {
     esac
   done
   awk -v fn="$filter_name" -v fs="$filter_status" '
-    BEGIN { id=""; title=""; status=""; priority=""; assignee=""; labels=""; created="" }
-    /^```task /                      { inblk=1; meta=1; id=$2; gsub(/^ *| *$/,"",id); title=""; status="todo"; priority="none"; assignee=""; labels=""; created="" }
-    /^```$/ && inblk                 { inblk=0; if (id!="") { if ((fn==""||assignee==fn) && (fs==""||status==fs)) print id "|" title "|" status "|" priority "|" assignee "|" labels "|" created; id="" } }
+    BEGIN { id=""; title=""; status=""; priority=""; assignee=""; labels=""; created=""; desc="" }
+    /^```task /                      { inblk=1; meta=1; id=$2; gsub(/^ *| *$/,"",id); title=""; status="todo"; priority="none"; assignee=""; labels=""; created=""; desc="" }
+    /^```$/ && inblk                 { inblk=0; if (id!="") { if ((fn==""||assignee==fn) && (fs==""||status==fs)) print id "|" title "|" status "|" priority "|" assignee "|" labels "|" created "|" substr(desc, 1, 240); id="" } }
     inblk && /^---/                   { meta=0; next }
+    inblk && !meta && !/^```/ {
+      line=$0; gsub(/^[ \t]+|[ \t]+$/, "", line)
+      if (line != "") desc = (desc == "" ? line : desc " / " line)
+    }
     inblk && meta && !/^```/ {
       line=$0; gsub(/^[ \t]+|[ \t]+$/, "", line)
       if (line ~ /^title:/)    { gsub(/^title: */, "", line); title=line }

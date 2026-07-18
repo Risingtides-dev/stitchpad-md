@@ -1865,6 +1865,11 @@ except: print("")' 2>/dev/null)"
         sp_tasks "$@"
         ;;
 
+      show)
+        tid="${1:?usage: stitchpad task show <TASK-N>}"
+        awk -v want="\`\`\`task $tid" '$0==want{p=1} p{print; if (p>1 && $0=="\`\`\`") exit; p=2}' "$PAD_MD"
+        ;;
+
       move)
         id="${1:-}"; new_status="${2:-}"
         [ -z "$id" ] && { echo "usage: stitchpad task move <id> <status>" >&2; exit 1; }

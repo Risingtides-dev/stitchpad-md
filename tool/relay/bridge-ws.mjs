@@ -506,6 +506,54 @@ async function keepAlive(p) {
 }
 setInterval(() => pads.forEach(keepAlive), 60000);
 
+// TARGET RE-RESOLUTION: an app reload rotates EVERY terminal id; roster targets
+// keep naming the dead ids and wakes route nowhere. Heartbeats can't self-heal
+// this (their surface IS the roster target). The bridge re-maps: a herdr row
+// whose terminal no longer exists gets re-pointed at the unique live pane
+// matching the agent's runtime + the pad's project dir. Ambiguous → skip + log;
+// never guess, never touch operator-locked or foreign-claimed terminals.
+const RUNTIME_AGENT = { claude: "claude", codex: "codex", pi: "pi" };
+async function healTargets() {
+  let panes = [];
+  try {
+    const { stdout } = await sh(HERDR, ["pane", "list"]);
+    panes = JSON.parse(stdout)?.result?.panes || [];
+  } catch { return; }
+  const liveTerms = new Set(panes.map(x => x.terminal_id).filter(Boolean));
+  const lockOf = t => { try { return readFileSync(join(HOME, ".stitchpad-terminals", t), "utf8").split("|"); } catch { return null; } };
+  for (const [, p] of pads) {
+    try { if (Date.now() - statSync(join(p.padd, "stitchpad.md")).mtimeMs > 7 * 86400e3) continue; } catch { continue; }
+    let roster;
+    try { roster = (await sh(SP, ["roster"], { cwd: p.proj })).stdout; } catch { continue; }
+    for (const line of roster.split("\n")) {
+      const [name, adapter, wake, target] = line.split("|").map(s => (s || "").trim());
+      if (!name || adapter !== "herdr" || !target || target === "-") continue;
+      const term = target.split("@@").pop();
+      if (liveTerms.has(term)) continue;   // target is alive — nothing to heal
+      let runtime = "";
+      try { runtime = readFileSync(join(p.padd, ".state", "runtime." + name), "utf8").trim(); } catch {}
+      const want = RUNTIME_AGENT[runtime] || null;
+      const cands = panes.filter(x =>
+        x.terminal_id && x.cwd === p.proj &&
+        (want ? x.agent === want : true) &&
+        (() => { const l = lockOf(x.terminal_id); return !l || (l[0] === p.padd && l[1] === name); })());
+      if (cands.length !== 1) {
+        log(p.name, `retarget: @${name} target ${term} is dead, ${cands.length} candidate panes — skipping (no guessing)`);
+        continue;
+      }
+      const nt = cands[0].terminal_id;
+      try {
+        await sh(SP, ["set-wake", name, wake || "push", nt, "herdr"], { cwd: p.proj });
+        // reset kills the old ticker (still beating the dead surface), clears
+        // the wake cursor, and restarts the heartbeat from the NEW roster target
+        await sh(SP, ["reset", name], { cwd: p.proj });
+        log(p.name, `retarget: @${name} ${term} (dead) → ${nt} (${cands[0].pane_id})`);
+      } catch (e) { log(p.name, `retarget failed for @${name}:`, e.message?.slice(0, 100)); }
+    }
+  }
+}
+setInterval(healTargets, 90000);
+
 // ── main ─────────────────────────────────────────────────────
 log(`relay=${RELAY} roots=${ROOTS.join(",")} (websocket mode)`);
 findPads().forEach(track);

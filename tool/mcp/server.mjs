@@ -594,7 +594,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         if (a.status) args.push("--status", a.status);
         out = await sp(args);
         out = out.trim()
-          ? `id|title|status|priority|assignee|labels|created\n${out.trim()}`
+          ? `id|title|status|priority|assignee|labels|created|description\n${out.trim()}`
           : "(no tasks match)";
         break;
       }

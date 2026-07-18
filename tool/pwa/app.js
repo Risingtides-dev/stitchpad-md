@@ -39,26 +39,48 @@ function fmt(t) {
   t = t.replace(/(^|[\s(])@([a-zA-Z0-9_-]+)/g, (m, p, n) => `${p}<b style="color:${colorFor(n)}">@${n}</b>`);
   return t;
 }
+// fenced blocks: ```task TASK-N renders as a real card (title, status,
+// assignee, DESCRIPTION — the body after ---); everything else stays a
+// copyable code block. Content arrives pre-escaped.
+function fenceBlock(f) {
+  const tm = (f.info || "").match(/^task\s+(\S+)/i);
+  if (tm) {
+    const meta = {}; const desc = []; let inDesc = false;
+    for (const ln of f.code.split("\n")) {
+      if (!inDesc && /^---/.test(ln)) { inDesc = true; continue; }
+      const kv = !inDesc && ln.match(/^(\w+):\s*(.*)$/);
+      if (kv) meta[kv[1]] = kv[2]; else if (inDesc && ln.trim()) desc.push(ln.trim());
+    }
+    const st = (meta.status || "todo").toLowerCase();
+    return `<div class="task-card st-${st}"><div class="tc-top"><b class="tc-id">${tm[1]}</b><span class="tc-chip tc-st">${st.replace(/_/g, " ")}</span>` +
+      (meta.priority && meta.priority !== "none" ? `<span class="tc-chip">${meta.priority}</span>` : "") +
+      (meta.assignee ? `<span class="tc-chip" style="color:${colorFor(meta.assignee)}">@${meta.assignee}</span>` : "") +
+      `</div><div class="tc-title">${meta.title || ""}</div>` +
+      (desc.length ? `<div class="tc-desc">${desc.join("<br>")}</div>` : "") + `</div>`;
+  }
+  return `<div class="cb"><button class="cpy" title="copy">copy</button><pre>${f.code}</pre></div>`;
+}
 function fmtMd(t) {
   // Block-level markdown for LLM output (thread summaries): headings, lists,
   // quotes, hr, code fences, paragraphs. Inline styling mirrors fmt().
   t = esc(t || "");
   const codes = [];
-  t = t.replace(/```(?:[a-zA-Z0-9_-]*\n)?([\s\S]*?)```/g, (m, c) => { codes.push(c.replace(/\s+$/, "")); return "\u0000" + (codes.length - 1) + "\u0000"; });
+  t = t.replace(/```([^\n]*)\n?([\s\S]*?)```/g, (m, info, c) => { codes.push({ info: info.trim(), code: c.replace(/\s+$/, "") }); return "\u0000" + (codes.length - 1) + "\u0000"; });
   const inline = s => s
-    .replace(/\u0000(\d+)\u0000/g, (m, i) => `<code>${codes[+i]}</code>`)
+    .replace(/\u0000(\d+)\u0000/g, (m, i) => `<code>${codes[+i].code}</code>`)
     .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g, (m, alt, url) => `<img class="msg-img" src="${url}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">`)
     .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
     .replace(/(^|[\s(])\*([^*\n]+)\*(?=$|[\s).,;:!?])/g, "$1<i>$2</i>")
-    .replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>')
+    .replace(/(?<!["'=])(https?:\/\/[^\s<">]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>')
     .replace(/(^|[\s(])@([a-zA-Z0-9_-]+)/g, (m, p, n) => `${p}<b style="color:${colorFor(n)}">@${n}</b>`);
   const out = []; let list = null, para = [];
   const endList = () => { if (list) { out.push(`<${list.t}>${list.i.map(x => `<li>${x}</li>`).join("")}</${list.t}>`); list = null; } };
-  const endPara = () => { if (para.length) { out.push(`<p>${para.join(" ")}</p>`); para = []; } };
+  const endPara = () => { if (para.length) { out.push(`<p>${para.join("<br>")}</p>`); para = []; } };
   for (const raw of t.split("\n")) {
     const l = raw.trim(); let m;
     if (!l) { endPara(); endList(); continue; }
-    if ((m = l.match(/^\u0000(\d+)\u0000$/))) { endPara(); endList(); out.push(`<div class="cb"><button class="cpy" title="copy">copy</button><pre>${codes[+m[1]]}</pre></div>`); continue; }
+    if ((m = l.match(/^\u0000(\d+)\u0000$/))) { endPara(); endList(); out.push(fenceBlock(codes[+m[1]])); continue; }
     if ((m = l.match(/^(#{1,6})\s+(.*)$/))) { endPara(); endList(); out.push(`<div class="md-h md-h${Math.min(m[1].length, 3)}">${inline(m[2])}</div>`); continue; }
     if ((m = l.match(/^[-*•]\s+(.*)$/))) { endPara(); if (!list || list.t !== "ul") { endList(); list = { t: "ul", i: [] }; } list.i.push(inline(m[1])); continue; }
     if ((m = l.match(/^\d+[.)]\s+(.*)$/))) { endPara(); if (!list || list.t !== "ol") { endList(); list = { t: "ol", i: [] }; } list.i.push(inline(m[1])); continue; }
@@ -475,9 +497,18 @@ function ClaimBar() {
 
 const cpyData = text => btoa(unescape(encodeURIComponent(text)));
 
+// message bodies render full markdown; walls of text clamp with "show more"
+function bubbleBd(text) {
+  const long = ((text.match(/\n/g) || []).length + 1) > 14 || text.length > 1400;
+  return html`<div class=${"bdwrap" + (long ? " clamped" : "")}>
+    <div class="bd md" dangerouslySetInnerHTML=${{ __html: fmtMd(text) }}></div>
+    ${long && html`<button class="bd-more">show more ▾</button>`}
+  </div>`;
+}
+
 function Row({ b, grouped, enter }) {
   const body = b.body.join("\n").trim();
-  const bd = html`<div class="bd" dangerouslySetInnerHTML=${{ __html: fmt(body) }}></div>`;
+  const bd = bubbleBd(body);
   const cpy = html`<button class="row-cpy" title="copy message" data-copy=${cpyData(body)}>copy</button>`;
   if (grouped) return html`<div class=${"row cmpct" + (enter ? " enter" : "")}>${cpy}<div class="gutter">${(b.t || "").replace(/\s*[AP]M$/i, "")}</div><div class="bubble">${bd}</div></div>`;
   return html`<div class=${"row" + (enter ? " enter" : "")}>${cpy}<${Av} n=${b.who}/><div class="bubble">
@@ -497,7 +528,7 @@ function DmRow({ dm }) {
     : null;
   return html`<div class=${"row" + (mine ? " dmrow" : "")}><${Av} n=${dm.from} trigger=${!mine}/><div class="bubble">
     <div class="hd"><span class=${"who" + (mine ? "" : " card-trigger")} data-agent=${dm.from} style=${{ color: nameColor(dm.from) }}>${dm.from}</span><span class="ts">${hh}:${mm}</span></div>
-    <div class="bd" dangerouslySetInnerHTML=${{ __html: fmt(dm.text) }}></div>
+    ${bubbleBd(dm.text)}
     ${rc && html`<div class=${"receipt " + rc.c}>${rc.t}</div>`}
   </div></div>`;
 }
@@ -510,7 +541,7 @@ function SessRow({ m, agent }) {
   const t = new Date(m.at), hh = String(t.getHours()).padStart(2, "0"), mm = String(t.getMinutes()).padStart(2, "0");
   return html`<div class=${"row" + (mine ? " dmrow" : "")}><${Av} n=${who} trigger=${!mine}/><div class="bubble">
     <div class="hd"><span class=${"who" + (mine ? "" : " card-trigger")} data-agent=${who} style=${{ color: nameColor(who) }}>${who}</span><span class="ts">${hh}:${mm}</span></div>
-    <div class="bd" dangerouslySetInnerHTML=${{ __html: fmt(m.text) }}></div>
+    ${bubbleBd(m.text)}
   </div></div>`;
 }
 
@@ -818,6 +849,14 @@ document.addEventListener("click", e => {
   if (b && b.parentElement.querySelector("pre")) {
     const code = b.parentElement.querySelector("pre").innerText;
     navigator.clipboard.writeText(code).then(() => { b.textContent = "copied"; b.classList.add("done"); setTimeout(() => { b.textContent = "copy"; b.classList.remove("done"); }, 1400); });
+    return;
+  }
+  // wall-of-text clamp toggle
+  const mo = e.target.closest(".bd-more");
+  if (mo) {
+    const w = mo.closest(".bdwrap"); if (!w) return;
+    const open = !w.classList.toggle("clamped");
+    mo.textContent = open ? "show less ▴" : "show more ▾";
   }
 });
 // images loading in can grow the log after we stuck to bottom — re-stick
