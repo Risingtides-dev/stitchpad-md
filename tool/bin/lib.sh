@@ -47,6 +47,15 @@ sp_init_paths() {
   PAD_GIT="$PAD_DIR/stitchpad-git"
   PAD_STATE="$PAD_DIR/.state"
   mkdir -p "$PAD_STATE/sessions"
+  # Pad git is load-bearing (read --new deltas, say auto-commits, compaction
+  # audit trail) but NOTHING ever initialized it — sp_commit just no-ops when
+  # it's absent, so a pad without it degrades silently. Self-heal on first use.
+  if [ ! -d "$PAD_GIT" ] && [ -f "$PAD_MD" ] && command -v git >/dev/null 2>&1; then
+    git --git-dir="$PAD_GIT" --work-tree="$PAD_DIR" init -q 2>/dev/null || true
+    git --git-dir="$PAD_GIT" --work-tree="$PAD_DIR" add stitchpad.md 2>/dev/null || true
+    git --git-dir="$PAD_GIT" --work-tree="$PAD_DIR" -c user.name=stitchpad -c user.email=pad@local \
+      commit -q -m "bootstrap: pad git (re)initialized" 2>/dev/null || true
+  fi
 }
 
 # ── Identity ─────────────────────────────────────────────────────────
