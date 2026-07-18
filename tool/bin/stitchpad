@@ -14,6 +14,7 @@
 #   stitchpad start|stop|status|restart   manage the daemon (background)
 #   stitchpad roster                      print parsed roster
 #   stitchpad rename <old> <new>          rename a member everywhere local state knows them
+#   stitchpad reset [name]                repair a wedged seat (or whole pad): zombie tickers, stale locks, wake cursors
 #   stitchpad who                         alias for roster
 #   stitchpad log [-n N]                  show recent history (git log)
 #
@@ -53,7 +54,7 @@ sp_autostart_name() {
 sp_maybe_start_heartbeat() {
   [ "${STITCHPAD_HEARTBEAT_AUTOSTART:-1}" = "0" ] && return 0
   case "$cmd" in
-    init|heartbeat|hook|bind-session|whoami|leave|stop|daemon|watch|migration-check|help|-h|--help) return 0 ;;
+    init|heartbeat|hook|bind-session|whoami|leave|stop|daemon|watch|migration-check|reset|help|-h|--help) return 0 ;;
   esac
   sp_init_paths >/dev/null 2>&1 || return 0
   local who
@@ -273,6 +274,87 @@ EOF
     fi
     echo "✓ @$old → @$new (roster, cursors, heartbeat, bindings, locks)"
     echo "note: a live agent session/MCP started as @$old keeps its in-memory identity until restarted — hook-side identity follows the renamed binding immediately."
+    ;;
+
+  reset)
+    # Repair a wedged seat — or the whole pad. Kills zombie heartbeat tickers,
+    # scrubs state left behind by renamed/evicted names, drops stale terminal
+    # locks, clears the wake-once cursor so the latest unanswered mention
+    # re-fires, and restarts heartbeats for roster seats with a live target.
+    #   stitchpad reset            sweep the whole pad
+    #   stitchpad reset <name>     reset one seat
+    sp_init_paths || exit 1
+
+    _reset_kill_ticker() {   # kill only pids THIS pad recorded for <name> (cross-pad safe)
+      local who="$1" pid=""
+      local pids="" p i
+      pid="$(cat "$PAD_STATE/heartbeat.$who.lock/pid" 2>/dev/null || true)"
+      [ -n "$pid" ] && kill "$pid" 2>/dev/null && { pids="$pids $pid"; echo "  · killed ticker pid $pid (@$who)"; }
+      pid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("pid",""))' "$PAD_STATE/alive.$who" 2>/dev/null || true)"
+      [ -n "$pid" ] && kill "$pid" 2>/dev/null && { pids="$pids $pid"; echo "  · killed alive pid $pid (@$who)"; }
+      # wait for exit traps to finish so a dying ticker can't delete the
+      # replacement's alive file after we restart
+      for p in $pids; do
+        i=0; while kill -0 "$p" 2>/dev/null && [ "$i" -lt 20 ]; do sleep 0.1; i=$((i+1)); done
+      done
+      rm -rf "$PAD_STATE/heartbeat.$who.lock" 2>/dev/null
+      rm -f "$PAD_STATE/alive.$who" 2>/dev/null
+    }
+    _reset_scrub_ghost() {   # remove every trace of a name no longer in the roster
+      local who="$1" _pfx _f
+      for _pfx in seen seen.relay count role level runtime forcewake dnd delivered_no_reply; do
+        rm -f "$PAD_STATE/$_pfx.$who" 2>/dev/null
+      done
+      for _f in "$PAD_STATE"/sessions/* "$PAD_STATE"/autoname.*; do
+        [ -f "$_f" ] || continue
+        [ "$(tr -d '[:space:]' < "$_f" 2>/dev/null)" = "$who" ] && rm -f "$_f"
+      done
+    }
+    _reset_seat() {          # roster member: fresh ticker + re-armable wake
+      local who="$1" target
+      _reset_kill_ticker "$who"
+      rm -f "$PAD_STATE/seen.$who" "$PAD_STATE/forcewake.$who" "$PAD_STATE/delivered_no_reply.$who" 2>/dev/null
+      target="$(sp_user_field "$who" target)"
+      if [ -n "$target" ] && [ "$target" != "-" ]; then
+        STITCHPAD_NAME="$who" STITCHPAD_HEARTBEAT_PARENT_PID=0 \
+          "$BIN_DIR/stitchpad" heartbeat start "$who" >/dev/null 2>&1 || true
+        echo "  · @$who: wake cursor cleared, heartbeat restarted (target $target)"
+      else
+        echo "  · @$who: wake cursor cleared (pull seat, no ticker)"
+      fi
+    }
+
+    who="${1:-}"
+    if [ -n "$who" ]; then
+      sp_user_exists "$who" || { echo "stitchpad: @$who not in roster" >&2; exit 1; }
+      echo "reset @$who:"
+      _reset_seat "$who"
+    else
+      echo "reset pad ($PAD_DIR):"
+      names="$(sp_roster | cut -d'|' -f1 | awk '{gsub(/^[ \t]+|[ \t]+$/,"");print}')"
+      # 1) ghosts: heartbeat/alive state for names not in the roster
+      for f in "$PAD_STATE"/alive.* "$PAD_STATE"/heartbeat.*.lock; do
+        [ -e "$f" ] || continue
+        g="$(basename "$f")"; g="${g#alive.}"; g="${g#heartbeat.}"; g="${g%.lock}"
+        printf '%s\n' "$names" | grep -qx "$g" && continue
+        echo "  ghost @$g:"
+        _reset_kill_ticker "$g"; _reset_scrub_ghost "$g"
+      done
+      # 2) terminal locks held by this pad for names not in the roster
+      for f in "$SP_TERMDIR"/*; do
+        [ -f "$f" ] || continue
+        IFS='|' read -r _lp _ln _lt < "$f"
+        [ "$_lp" = "$PAD_DIR" ] || continue
+        printf '%s\n' "$names" | grep -qx "$_ln" && continue
+        rm -f "$f" && echo "  · dropped stale lock $(basename "$f") (@$_ln)"
+      done
+      # 3) every roster seat gets a fresh ticker + cleared cursor
+      for n in $names; do _reset_seat "$n"; done
+      # 4) watcher
+      ensure_watcher
+      echo "  · watcher ensured"
+    fi
+    echo "✓ reset done"
     ;;
 
   clear)
