@@ -451,6 +451,32 @@ async function healRoster(p) {
 }
 setInterval(() => pads.forEach(healRoster), 60000);
 
+// KEEPALIVE: a terminal reload kills every disowned heartbeat ticker at once;
+// with all tickers dead the watcher refuses to spawn ("no one listening") and
+// the wake loop goes dark silently. The bridge outlives terminals (launchd),
+// so it revives tickers for roster seats with a wake target and re-ensures
+// the watcher every cycle.
+async function keepAlive(p) {
+  let roster;
+  try { roster = (await sh(SP, ["roster"], { cwd: p.proj })).stdout; } catch { return; }
+  for (const line of roster.split("\n")) {
+    const [name, , , target] = line.split("|").map(s => (s || "").trim());
+    if (!name || !target || target === "-") continue;
+    let stale = true;
+    try {
+      const hb = JSON.parse(readFileSync(join(p.padd, ".state", "alive." + name), "utf8"));
+      stale = Date.now() / 1000 - (hb.ts || 0) > 120;
+    } catch { /* no alive file → stale */ }
+    if (!stale) continue;
+    try {
+      await sh(SP, ["heartbeat", "start", name], { cwd: p.proj, env: { ...process.env, STITCHPAD_NAME: name, STITCHPAD_HEARTBEAT_PARENT_PID: "0" } });
+      log(p.name, `keepalive: revived heartbeat for @${name}`);
+    } catch (e) { log(p.name, `keepalive failed for @${name}:`, e.message); }
+  }
+  sh(SP, ["ensure-watcher"], { cwd: p.proj }).catch(() => {});
+}
+setInterval(() => pads.forEach(keepAlive), 60000);
+
 // ── main ─────────────────────────────────────────────────────
 log(`relay=${RELAY} roots=${ROOTS.join(",")} (websocket mode)`);
 findPads().forEach(track);
