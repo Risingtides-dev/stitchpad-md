@@ -173,6 +173,9 @@ async function dmStatus(p, msg, status, detail) {
 async function onDm(p, msg) {
   const { from, to, text } = msg;
   if (!to || !text) return;
+  // record inbound in the pair's sqlite DB so the recipient can `dm read`
+  // the whole conversation locally — delivery outcome is tracked separately
+  sh(SP, ["dm", "record", from, to, text], { cwd: p.proj }).catch(() => {});
   let delivered = false;
   // OCEAN-ADAPTER agents live as daemon sessions, not terminals — deliver the
   // DM as a turn on their session. (Without this, the heartbeat-surface
@@ -188,7 +191,7 @@ async function onDm(p, msg) {
         await api(`/dm-in?pad=${encodeURIComponent(p.name)}`, { method: "POST", body: JSON.stringify({ from: to, to: from, text: `⚠ @${to} is a daemon session, not a terminal — slash commands don't exist there. Plain messages work.`, at: Date.now() }) }).catch(() => {});
         return;
       }
-      const prompt = `stitchpad DM from @${from} (private — not on the pad): ${text}\n\nReply PRIVATELY (do not post on the pad) with:\n  cd ${p.proj} && STITCHPAD_NAME=${to} ~/.stitchpad/bin/stitchpad dm ${from} '<your reply>'`;
+      const prompt = `stitchpad DM from @${from} (private — not on the pad): ${text}\n\nReply PRIVATELY (do not post on the pad) with:\n  cd ${p.proj} && STITCHPAD_NAME=${to} ~/.stitchpad/bin/stitchpad dm say ${from} '<your reply>'\n(history: stitchpad dm read ${from})`;
       const r = await fetch(`${OCEAN_URL}/v1/agent/turns`, {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ session_id: row[3], prompt, cwd: p.proj, client_type: "stitchpad" }),
@@ -226,7 +229,7 @@ async function onDm(p, msg) {
   {
     if (pane) {
       const dmsg = cmd ? clean
-        : `stitchpad DM from @${from} (private — not on the pad; reply lands on the pad unless they DM you back): ${clean}`;
+        : `stitchpad DM from @${from} (PRIVATE — do NOT answer on the pad): ${clean}\nreply privately: \`stitchpad dm say ${from} '<your reply>'\` (history: \`stitchpad dm read ${from}\`) — a pad \`say\` would broadcast your answer to everyone.`;
       const { err } = await sh(HERDR, ["pane", "run", pane, dmsg]);
       delivered = !err;
       if (delivered) {

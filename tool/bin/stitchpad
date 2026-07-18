@@ -922,19 +922,77 @@ PY
     ;;
 
   dm)
-    # True DM — bypasses the pad entirely. Queues into .state/dmout.jsonl; the
-    # relay bridge forwards it to the recipient's DM pane on the phone (and the
-    # relay records it in the per-pair DM log). Sender = your bound identity.
-    #   stitchpad dm <@handle> <text...>
+    # True DM — bypasses the pad entirely. Every DM pair gets its own sqlite DB
+    # (.state/dm/<a>~<b>.sqlite) so BOTH sides of the conversation are readable
+    # locally; outbound also queues into .state/dmout.jsonl for the relay bridge
+    # (phone pair log + notification). Inbound (phone → agent) is recorded by
+    # the bridge via `dm record`. NEVER lands on the pad.
+    #   stitchpad dm say <@handle> <text...>     send (also: dm <@handle> <text...>)
+    #   stitchpad dm read <@handle> [-n N]       your conversation with them
+    #   stitchpad dm list                        pairs you have history with
+    #   stitchpad dm record <from> <to> <text>   internal: bridge writes inbound
     sp_init_paths || exit 1
-    who="$(sp_me)"
-    [ -z "$who" ] && { echo "stitchpad: no identity — call the MCP join tool first (or set STITCHPAD_NAME)" >&2; exit 1; }
-    to="${1:?usage: stitchpad dm <@handle> <text...>}"; shift || true
-    to="${to#@}"
-    text="$*"
-    [ -z "$text" ] && { echo "stitchpad: empty message" >&2; exit 1; }
-    jq -nc --arg f "$who" --arg t "$to" --arg x "$text" '{from:$f,to:$t,text:$x,at:(now*1000|floor)}' >> "$PAD_STATE/dmout.jsonl" \
-      && echo "✓ DM → @$to (private, via relay bridge — not on the pad)"
+    _dm_db() {  # sorted pair → one canonical db per conversation
+      local a="$1" b="$2" lo hi
+      if [ "$a" \< "$b" ]; then lo="$a"; hi="$b"; else lo="$b"; hi="$a"; fi
+      mkdir -p "$PAD_STATE/dm"
+      printf '%s' "$PAD_STATE/dm/$lo~$hi.sqlite"
+    }
+    _dm_q() { printf '%s' "$1" | sed "s/'/''/g"; }
+    _dm_insert() { # db at sender recipient text
+      /usr/bin/sqlite3 "$1" \
+        "CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL, text TEXT NOT NULL);
+         INSERT INTO messages(at,sender,recipient,text) VALUES($2,'$(_dm_q "$3")','$(_dm_q "$4")','$(_dm_q "$5")');"
+    }
+    sub="${1:-}"
+    case "$sub" in
+      say|read|list|record) shift || true ;;
+      *) sub="say" ;;   # backcompat: stitchpad dm <@handle> <text...>
+    esac
+    case "$sub" in
+      say)
+        who="$(sp_me)"
+        [ -z "$who" ] && { echo "stitchpad: no identity — call the MCP join tool first (or set STITCHPAD_NAME)" >&2; exit 1; }
+        to="${1:?usage: stitchpad dm say <@handle> <text...>}"; shift || true
+        to="${to#@}"
+        text="$*"
+        [ -z "$text" ] && { echo "stitchpad: empty message" >&2; exit 1; }
+        _at="$(date +%s)000"
+        _dm_insert "$(_dm_db "$who" "$to")" "$_at" "$who" "$to" "$text"
+        jq -nc --arg f "$who" --arg t "$to" --arg x "$text" '{from:$f,to:$t,text:$x,at:(now*1000|floor)}' >> "$PAD_STATE/dmout.jsonl" \
+          && echo "✓ DM → @$to (private — recorded locally, relayed to their surface; NOT on the pad)"
+        ;;
+      record)
+        _from="${1:?usage: stitchpad dm record <from> <to> <text...>}"; shift || true
+        _to="${1:?usage: stitchpad dm record <from> <to> <text...>}"; shift || true
+        _text="$*"
+        [ -z "$_text" ] && exit 0
+        _dm_insert "$(_dm_db "$_from" "$_to")" "$(date +%s)000" "$_from" "$_to" "$_text"
+        ;;
+      read)
+        who="$(sp_me)"
+        [ -z "$who" ] && { echo "stitchpad: no identity — set STITCHPAD_NAME or join first" >&2; exit 1; }
+        with="${1:?usage: stitchpad dm read <@handle> [-n N]}"; shift || true
+        with="${with#@}"
+        n=30; [ "${1:-}" = "-n" ] && n="${2:-30}"
+        db="$(_dm_db "$who" "$with")"
+        [ -f "$db" ] || { echo "(no DM history with @$with)"; exit 0; }
+        /usr/bin/sqlite3 -separator '|' "$db" \
+          "SELECT at,sender,text FROM (SELECT * FROM messages ORDER BY id DESC LIMIT $n) ORDER BY id ASC;" \
+          | while IFS='|' read -r _at _s _rest; do
+              printf '[%s] @%s: %s\n' "$(date -r "$(( _at / 1000 ))" '+%m-%d %H:%M' 2>/dev/null || echo '?')" "$_s" "$_rest"
+            done
+        ;;
+      list)
+        [ -d "$PAD_STATE/dm" ] || { echo "(no DMs yet)"; exit 0; }
+        for db in "$PAD_STATE"/dm/*.sqlite; do
+          [ -f "$db" ] || continue
+          pair="$(basename "$db" .sqlite)"
+          info="$(/usr/bin/sqlite3 "$db" "SELECT COUNT(*) || ' msgs, last ' || datetime(MAX(at)/1000,'unixepoch','localtime') FROM messages;" 2>/dev/null)"
+          printf '%s — %s\n' "${pair/\~/ ↔ }" "$info"
+        done
+        ;;
+    esac
     ;;
 
   dnd)

@@ -130,17 +130,19 @@ function padCwd() {
 
 // `me` pins STITCHPAD_NAME for this call so the CLI derives the sender from
 // identity, not a trusted arg. (LOCAL MODE only — relay tools call relay* below.)
-// Every result is stamped with the pad it actually hit, so a misrouted call is
-// self-evident to the agent instead of silent.
+// NOTE: sp() output is consumed PROGRAMMATICALLY in places (whoami → identity
+// validation) — never decorate it here. Agent-facing handlers add padStamp().
 async function sp(args, me, extraEnv = {}) {
-  const cwd = padCwd();
   const { stdout, stderr } = await execFileP(CLI, args, {
-    cwd,
+    cwd: padCwd(),
     env: { ...process.env, STITCHPAD_HOME, ...extraEnv, ...(me ? { STITCHPAD_NAME: me } : {}) },
     maxBuffer: 1024 * 1024,
   });
-  return (stdout || "") + (stderr ? `\n${stderr}` : "") + `\n[pad: ${path.basename(cwd)}]`;
+  return (stdout || "") + (stderr ? `\n${stderr}` : "");
 }
+// Stamp agent-facing results with the pad they actually hit, so a misrouted
+// call is self-evident to the agent instead of silent.
+const padStamp = (s) => `${s}\n[pad: ${path.basename(padCwd())}]`;
 
 // ── Relay HTTP client (remote-agent mode) ───────────────────────────────
 function relayHeaders() {
@@ -331,6 +333,37 @@ const TOOLS = [
     },
   },
   {
+    name: "dm_say",
+    description:
+      "Send a PRIVATE direct message to one teammate — never lands on the pad. " +
+      "Use this to answer incoming DMs (the operator's phone DMs arrive marked " +
+      "PRIVATE) or for 1:1 side-channel coordination. Replying to a DM with the " +
+      "public say tool broadcasts it to everyone — don't.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "Recipient handle (e.g. 'smaths')." },
+        text: { type: "string", description: "The private message." },
+      },
+      required: ["to", "text"],
+    },
+  },
+  {
+    name: "dm_read",
+    description:
+      "Read your private DM conversation with one teammate (both directions, " +
+      "stored locally per pair). Check this when a DM wake references earlier " +
+      "context you don't have.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        with: { type: "string", description: "The other party's handle." },
+        lines: { type: "number", description: "How many recent messages (default 30)." },
+      },
+      required: ["with"],
+    },
+  },
+  {
     name: "read",
     description: "Read the recent stitchpad conversation.",
     inputSchema: {
@@ -514,21 +547,31 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           break;
         }
         if (!ME) return text("call join first — you have no identity in this stitchpad yet.", true);
-        out = await sp(["say", a.text], ME);   // sender derived from server memory, never the agent
+        out = padStamp(await sp(["say", a.text], ME));   // sender derived from server memory, never the agent
+        break;
+      case "dm_say":
+        if (RELAY_MODE) return text("DMs are not available over relay yet.", true);
+        if (!ME) return text("call join first — DMs need your identity.", true);
+        out = padStamp(await sp(["dm", "say", String(a.to || "").replace(/^@/, ""), a.text], ME));
+        break;
+      case "dm_read":
+        if (RELAY_MODE) return text("DMs are not available over relay yet.", true);
+        if (!ME) return text("call join first — DMs need your identity.", true);
+        out = padStamp(await sp(["dm", "read", String(a.with || "").replace(/^@/, ""), "-n", String(a.lines || 30)], ME));
         break;
       case "read":
         if (RELAY_MODE) {
           out = await relayRead();
           break;
         }
-        out = await sp(["read", "-n", String(a.lines || 80)]);
+        out = padStamp(await sp(["read", "-n", String(a.lines || 80)]));
         break;
       case "who":
         if (RELAY_MODE) {
           out = await relayWho();
           break;
         }
-        out = await sp(["roster"]);
+        out = padStamp(await sp(["roster"]));
         break;
       case "leave":
         if (RELAY_MODE) {
