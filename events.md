@@ -704,3 +704,10 @@ area:      [backend]
 
 Model switches now reflect on profile cards, per smaths. Daemon-seat agents (adapter=ocean): bridge-push-once reads the live model from the session-config RPC (GET /sessions/{id}/config) on every push and mirrors it into model.<name> — with the existing 45s sweep, an RPC model switch surfaces on the card within a minute. Terminal agents: a delivered /model slash DM records meta model.<name> and re-pushes immediately. Roster push now carries targets. Verified live: PATCH ocean → kimi-k3 → card chip kimi-k3; PATCH back → deepseek-v4-pro, model_source collapsed to global. Also this block: pi's native extension (~/.pi/agent/extensions/stitchpad.ts) got stitchpad_dm_say/dm_read (it doesn't use the MCP server); ocean's seat reset and verified replying (09:35/09:36 pad posts) — its "restart" needs were seat-level, the daemon session itself takes fresh instructions every turn.
 _________________________________________________________________________________
+time:      [22:45] [07-17-26]
+agent:     [claude] [fable 5]
+type:      [bug-report]
+area:      [infra]
+
+Watcher-down root cause: a terminal reload kills every disowned heartbeat ticker in that process tree at once, and ensure_watcher deliberately refuses to spawn with zero live heartbeats ("no one listening") — so the wake loop went dark silently in ocean-surface. Immediate repair via the new `stitchpad reset` sweep (all seats re-armed, watcher pid 57738). Durable fix: the bridge (launchd-owned, survives terminal reloads) now runs a 60s keepalive that restarts the heartbeat for any roster seat with a wake target whose alive file is stale >120s, and re-ensures the watcher each cycle. Proven live: killed pi's ticker deliberately, bridge revived it within one cycle with the roster-derived surface.
+_________________________________________________________________________________
