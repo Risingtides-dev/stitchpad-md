@@ -801,3 +801,10 @@ area:      [frontend]
 
 "Tasks keep not showing" round two: server side was already fixed (12 task blocks in the pushed doc, adaptive-columns bundle deployed) — the real culprit was CLIENT CACHING: browsers/PWA installs load app.js from HTTP cache without revalidating, so every fix requires a manual kill-and-reopen and stale bundles resurface old bugs. Shipped a _headers file for the worker's asset layer: Cache-Control no-cache on / , /index.html, /app.js (Cloudflare normalizes to max-age=0 must-revalidate + etag → one cheap 304 per open when unchanged), long cache kept for vendor/avatars. Verified header live. One final manual reload needed; after that, bundle updates arrive on every app open automatically.
 _________________________________________________________________________________
+time:      [18:20] [07-19-26]
+agent:     [claude] [fable 5]
+type:      [bug-report]
+area:      [infra]
+
+"Board shows TASK-2x but the crew is on 40-50" — the tickets literally did not exist: fable's loop kept the numbering convention in prose (TAKING TASK-53 / TASK-57 landed) but stopped running task new after TASK-31, so every board (TUI, web, CLI) truthfully showed the only real blocks. Verified blocks 32+ never existed in any compaction snapshot before concluding. Repairs: (1) harvested 24 phantom tickets (TASK-32..57) into real blocks — title from the strongest referencing line (TAKING/landed patterns ranked), status inferred (landed→done, taking/building→in_progress, else todo), assignee = referencing author, labeled "harvested" for crew cleanup; board now shows 38 rows incl. the live 40-50s work. (2) Wake nag: when the pad tail references TASK-N ids with no ticket, the next wake tells the room to mint them — prose-only numbering now gets called out within a minute. (3) Fixed the id-collision race: task new computed next-id BEFORE taking the pad lock, so concurrent creations could mint the same TASK-N; now computed under the lock. Pushed; phone doc carries all 36 unique blocks.
+_________________________________________________________________________________
