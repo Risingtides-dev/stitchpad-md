@@ -68,8 +68,9 @@ if [ -n "$third" ]; then
   fail 'addressed reply did not clear unanswered mention'
 fi
 
-# Regression 3: hook identity must be explicit. A hook with no STITCHPAD_NAME is
-# silent; a hook pinned as larry wakes Larry even if Dale is also in the room.
+# Regression 3: Stop-hook identity is session-authoritative. A hook with no bound
+# session is silent even if STITCHPAD_NAME leaks from the runtime environment;
+# a bound Larry session wakes Larry even when that stale env names Dale.
 case3="$tmp/case3"
 mkdir "$case3"
 cd "$case3"
@@ -78,11 +79,12 @@ cd "$case3"
 "$SP" join dale claude >/dev/null
 stop_watcher "$case3"
 STITCHPAD_NAME=tester "$SP" say '@larry identity ping' >/dev/null
-unbound="$(printf '{"cwd":"%s","stop_hook_active":false}' "$case3" | "$SP" hook)"
-[ -z "$unbound" ] || fail 'unbound hook should not guess an identity'
-pinned="$(printf '{"cwd":"%s","stop_hook_active":false}' "$case3" | STITCHPAD_NAME=larry "$SP" hook)"
-contains "$pinned" '"decision":"block"' || fail 'pinned Larry hook did not block'
-contains "$pinned" '@larry identity ping' || fail 'pinned Larry hook missed message'
+unbound="$(printf '{"cwd":"%s","stop_hook_active":false}' "$case3" | STITCHPAD_NAME=larry "$SP" hook)"
+[ -z "$unbound" ] || fail 'unbound hook should not trust an environment identity'
+STITCHPAD_CWD="$case3" "$SP" bind-session larry-session larry >/dev/null
+pinned="$(printf '{"cwd":"%s","session_id":"larry-session","stop_hook_active":false}' "$case3" | STITCHPAD_NAME=dale "$SP" hook)"
+contains "$pinned" '"decision":"block"' || fail 'session-bound Larry hook did not block'
+contains "$pinned" '@larry identity ping' || fail 'session-bound Larry hook missed message'
 
 # Regression 4: real chat often includes a speaker prefix before the mention
 # ("dale @larry ..."). That should still wake larry; requiring @name at column 1

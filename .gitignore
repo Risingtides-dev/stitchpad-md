@@ -17,3 +17,7 @@ tool/.state/
 # mcp server deps (installed via npm install)
 tool/mcp/node_modules/
 tool/mcp/package-lock.json
+
+tool/relay/.wrangler/
+
+tool/stitchpad-git/

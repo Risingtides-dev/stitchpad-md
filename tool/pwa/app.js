@@ -163,6 +163,12 @@ function keyBlocks(blocks) {
   }
   return blocks;
 }
+// OS notification helper — permission-gated, never throws. Fires only when the
+// window is hidden so an active reader is never double-pinged.
+function notifyOS(title, body) {
+  if (typeof Notification === "undefined" || Notification.permission !== "granted" || !document.hidden) return;
+  try { new Notification(title, { body: (body || "").slice(0, 160), icon: "icon-192.png" }); } catch (_) {}
+}
 function acceptDoc(d) {
   if (d.name && d.name !== store.pad) return;      // stale after a pad switch
   if (d.at) PAD_ETAG = `"${d.at}"`;
@@ -172,10 +178,19 @@ function acceptDoc(d) {
   // naive swap drops rows off the TOP and shifts the log under a reader who is
   // scrolled up (the focus-yank complaint). The pad is append-only — keep every
   // block we've seen this session, splice the fresh window onto the tail.
-  if (!store.blocks) store.blocks = fresh;
+  if (!store.blocks) store.blocks = fresh;   // initial hydrate — no notifications
   else {
+    const prevKeys = new Set(store.blocks.map(b => b.key));
     const freshKeys = new Set(fresh.map(b => b.key));
     store.blocks = [...store.blocks.filter(b => !freshKeys.has(b.key)), ...fresh].slice(-500);
+    // mention notifications: genuinely-new blocks, not mine, that @-mention me
+    const meRe = new RegExp("@" + store.me.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "i");
+    for (const b of fresh) {
+      if (b.sys || prevKeys.has(b.key)) continue;
+      if ((b.who || "").toLowerCase() === store.me.toLowerCase()) continue;
+      const text = (b.body || []).join("\n");
+      if (meRe.test(text)) notifyOS("stitchpad — @" + b.who + " mentioned you in #" + store.pad, text);
+    }
   }
   // drop optimistic pendings that have landed (fuzzy: bridge may reflow text,
   // and the CLI REWRITES mentions — "@all hey" lands as "@codex @fable … hey" —
@@ -293,6 +308,9 @@ function pushDm(msg) {
   if (cur.some(m => m.from === msg.from && m.text === msg.text && Math.abs((m.at || 0) - (msg.at || 0)) < 15000)) return;
   const was = nearBottom();
   store.dmlogs = { ...store.dmlogs, [peer]: [...cur, msg].slice(-200) };
+  // incoming DM notification (outbound echoes are from me and skipped)
+  if ((msg.from || "").toLowerCase() !== store.me.toLowerCase())
+    notifyOS("stitchpad — DM from @" + msg.from, msg.text);
   publish();
   if (store.dmWith === peer && was) requestAnimationFrame(() => stick(true));
 }

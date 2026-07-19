@@ -25,10 +25,9 @@ if [ -z "$RELAY" ] || [ -z "$TOKEN" ] || [ -z "$HANDLE" ]; then
   exit 1
 fi
 
-SC_SURFACE="${VELOCITY_SURFACE_ID:-${SUPACODE_SURFACE_ID:-}}"
-SC_TAB="${VELOCITY_TAB_ID:-${SUPACODE_TAB_ID:-}}"
-SC_WORKTREE="${VELOCITY_WORKTREE_ID:-${SUPACODE_WORKTREE_ID:-}}"
-# Velocity is the only surface. (SUPACODE_* are the env vars Velocity inherited.)
+SC_SURFACE="${VELOCITY_SURFACE_ID:-}"
+SC_TAB="${VELOCITY_TAB_ID:-}"
+SC_WORKTREE="${VELOCITY_WORKTREE_ID:-}"
 SURFACE_APP="velocity"
 
 if [ -z "$SC_SURFACE" ] || [ -z "$SC_TAB" ]; then

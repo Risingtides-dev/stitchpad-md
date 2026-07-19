@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # stitchpad wake adapter for Velocity (Ghostty/zmx terminal surfaces).
 #
-# Velocity owns the surface stack it inherited from Supacode: the CLI
-# (velocity surface focus/send-key/list), zmx as the session multiplexer
-# (sessions named supa-<surface-uuid>), and the SUPACODE_* env the app emits.
-# Those names are inherited internals, not a dependency on a separate app.
+# Velocity owns the full surface stack: the CLI (surface focus/send-key/list),
+# zmx as the session multiplexer, and the surface env it injects into each shell.
 #
 # Called by the watcher as:  velocity.sh mention <name> <stitchpad.md> <taskfile>
 # Env: SP_TARGET = "<worktree>@@<tab_uuid>@@<surface_uuid>" (roster is pipe-delimited).
@@ -162,10 +160,9 @@ resolve_tab_for_surface() {
 # Validate the stored UUID against live zmx sessions (a restart/outage invalidates
 # old surfaces). zmx is a quick liveness guard; below we also resolve the owning
 # tab because a surface can live under a different tab than the roster recorded.
-# zmx names each surface's session "supa-<surface-uuid>" (a Velocity-internal
-# convention we just match against — not a dependency on Supacode the app).
+# zmx names each surface's session "velocity-<surface-uuid>".
 if [ -n "$surface" ]; then
-  _sess_check="supa-$(printf '%s' "$surface" | tr 'A-Z' 'a-z')"
+  _sess_check="velocity-$(printf '%s' "$surface" | tr 'A-Z' 'a-z')"
   if ! "$zmx_bin" list --short 2>/dev/null | grep -Fxq "$_sess_check"; then
     echo "[$(ts)] stored zmx session $_sess_check not live — clearing for self-heal" >>"$log"
     tab=""; surface=""
@@ -240,7 +237,7 @@ _nudge_file="$pad_dir/.state/nudge.$to"
 mkdir -p "$(dirname "$_nudge_file")" 2>/dev/null || true
 printf '%s' "$nudge" > "$_nudge_file"
 
-_session="supa-$(printf '%s' "$surface" | tr 'A-Z' 'a-z')"
+_session="velocity-$(printf '%s' "$surface" | tr 'A-Z' 'a-z')"
 
 # PRIMARY — silent PTY write via zmx. This writes raw input straight into the
 # target session's pty WITHOUT focusing the surface, so a wake to a background

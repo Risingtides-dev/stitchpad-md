@@ -81,34 +81,31 @@ stitchpad-tui
 > Restart claude/codex after wiring the MCP + hook so they load. Identity comes
 > from the MCP `join` tool (bound to your session) — not an env var.
 
-### Two wake layers
+### Wake Layers
 
-A mention reaches an agent one of two ways. You get the first for free; the
-second is what makes live multi-agent collaboration feel instant.
+A mention reaches an agent one of two explicit ways. Pull members use their real
+runtime hook; push members deliberately bind an external surface.
 
-- **Turn-end wake (baseline, no kitty).** The Stop hook (claude/codex) and pi's
-  `agent_end` event run `stitchpad wake <me>` every time the agent finishes a
-  turn. If a mention to `@me` landed, the runtime is told "don't stop — new
-  prompt," and the agent reads + replies. Always available, nothing extra to
-  install. The catch: an idle agent only notices on its *next* turn, so a
-  mention can sit until something else makes it take a turn.
+- **Turn-end wake.** The Stop hook (claude/codex) and pi's `agent_end` event run
+  `stitchpad wake <me>` every time the agent finishes a turn. If a mention to
+  `@me` landed, the runtime is told "don't stop — new prompt," and the agent
+  reads + replies.
 
-- **kitty external wake (recommended for live collaboration).** Run each agent
-  in a [kitty](https://sw.kovidgoyal.net/kitty/) window and stitchpad wakes it
-  the *moment* a mention lands — no waiting for its next turn. kitty's remote
-  control types the nudge straight into the agent's window. Requires:
-  - agents running inside kitty windows;
-  - `allow_remote_control socket-only` (or `yes`) in your `kitty.conf`;
-  - the window titled `🧵 <name>` — set automatically at join; the adapter
-    self-heals by finding that title even if the window id wasn't captured.
+- **Herdr native wake.** In a Herdr-managed pane, MCP/pi resolves
+  `HERDR_PANE_ID` to a stable terminal ID and records `herdr | push | term_…`.
+  The watcher delivers through `herdr pane run`, with cross-pad and focus guards.
 
-  kitty is the **default/recommended** wake here, not a hard requirement: drop
-  it and you still have the turn-end baseline above for a solo or non-kitty
-  setup.
+- **Velocity native wake.** When the agent is running inside a Velocity surface,
+  the MCP join records the `VELOCITY_WORKTREE_ID`, `VELOCITY_TAB_ID`, and
+  `VELOCITY_SURFACE_ID` target. The watcher submits the wake through the bundled
+  Velocity CLI so the agent reacts without waiting for another turn.
+
+- **Ocean daemon wake.** Ocean sessions bind their daemon session ID as an
+  `ocean | push` target. The watcher submits a bounded wake turn through
+  `ocean-heartbeat`, deferring while the session is already busy.
 
 > Verify your setup with `stitchpad doctor` — it reports each roster member's
-> wake health (window found + targeted, identity bound) and flags a stale or
-> missing kitty target before it bites you.
+> wake health, target binding, and session identity.
 
 ## CLI
 
@@ -125,10 +122,9 @@ second is what makes live multi-agent collaboration feel instant.
 | `stitchpad log [-n N]` | git history (one commit per message) |
 | `stitchpad-tui` | live Slack-style terminal view |
 
-> The watcher (`start`/`watch`) is **optional** — it's a convenience for
-> non-hooked surfaces (e.g. desktop notifications). The actual wake is the
-> per-runtime turn-end hook; you do not need the watcher running for agents to
-> pick up their mentions.
+> The watcher (`start`/`watch`) serves explicit `push` targets only. It skips
+> `pull` members completely; their configured runtime hooks remain the sole wake
+> path, so the visible interactive session stays authoritative.
 
 ## Adapters (how a teammate gets woken)
 
@@ -138,8 +134,11 @@ itself is wired once per machine at the runtime level (see Quickstart).
 | adapter | wake mechanism | wiring |
 |---------|----------------|--------|
 | `claude` | Stop hook → `stitchpad wake` | `~/.claude/settings.json` → `adapters/stop-hook.sh` |
-| `codex` | Stop hook (same script) → `stitchpad wake` | `~/.codex/hooks.json` → `adapters/stop-hook.sh` (trust via `/hooks`) |
+| `codex` | Stop hook → `stitchpad wake` | `~/.codex/hooks.json` → `adapters/stop-hook.sh`; session binding from MCP `join` |
 | `pi` | `agent_end` extension event → `stitchpad wake` | `pi install ~/.stitchpad/adapters/stitchpad` |
+| `herdr` | `herdr pane run` → live managed pane | auto-detected from `HERDR_PANE_ID` by MCP/pi |
+| `velocity` | native Velocity/zmx surface injection | auto-detected from `VELOCITY_*` surface environment |
+| `ocean` | `ocean-heartbeat wake` → daemon session | roster target is the bound Ocean session ID |
 
 Identity isn't in the hook — it's bound when the agent calls the MCP `join` tool,
 which writes a session record the hook reads (via the Stop payload's session id).

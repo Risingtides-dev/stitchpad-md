@@ -179,12 +179,13 @@ EOF
     echo "── house rule: to acknowledge/wind down, start the line with \".\" (e.g. \".ack ok\") — never @-reply a goodbye; an @-mention wakes that agent. ──"
     # KEEP-ALIVE + AUTO-WATCHER: joining a pad starts a per-agent heartbeat
     # ticker. Watchers consume .state/alive.<name>; Stop hooks only supplement it.
-    STITCHPAD_NAME="$who" STITCHPAD_HEARTBEAT_PARENT_PID="${STITCHPAD_HEARTBEAT_PARENT_PID:-$PPID}" \
-      "$BIN_DIR/stitchpad" heartbeat start "$who" >/dev/null 2>&1 \
-      && echo "── heartbeat started for @$who ──"
-    # Ensure watcher singleton is running (idempotent — ensure_watcher no-ops if up).
-    STITCHPAD_PAD_DIR="$PAD_DIR" ensure_watcher 2>/dev/null \
-      && echo "── wake watcher started for this pad ──"
+    if STITCHPAD_NAME="$who" STITCHPAD_HEARTBEAT_PARENT_PID="${STITCHPAD_HEARTBEAT_PARENT_PID:-$PPID}" \
+      "$BIN_DIR/stitchpad" heartbeat start "$who" >/dev/null 2>&1; then
+      echo "── heartbeat started for @$who ──"
+    fi
+    # The heartbeat ticker ensures the watcher immediately and on every tick.
+    # Do not race it with a second join-time ensure against the same PID lock.
+    true
     ;;
 
   set-wake)
@@ -884,8 +885,12 @@ PY
           fi
         fi
         (
-          ticker_pid="$BASHPID"
-          echo "$ticker_pid" > "$lockd/pid"
+          # Bash 3.2 (the macOS system bash) has no $BASHPID. The parent
+          # records the background subshell's real pid via $!, then the child
+          # reads it before publishing its first heartbeat.
+          while [ ! -s "$lockd/pid" ]; do sleep 0.01; done
+          ticker_pid="$(cat "$lockd/pid" 2>/dev/null || true)"
+          [ -n "$ticker_pid" ] || exit 1
           trap 'rm -rf "$lockd"; rm -f "$PAD_STATE/alive.$STITCHPAD_NAME"' EXIT INT TERM
           while :; do
             heartbeat_write "$STITCHPAD_NAME" "$ticker_pid" "$parent" "$session" "$surface" "$target"
@@ -896,6 +901,8 @@ PY
             [ -n "$parent" ] && ! kill -0 "$parent" 2>/dev/null && exit 0
           done
         ) &
+        ticker_pid=$!
+        echo "$ticker_pid" > "$lockd/pid"
         disown
         echo "heartbeat started for @$who"
         ;;
@@ -906,7 +913,7 @@ PY
         if [ -z "$pid" ]; then
           pid="$(heartbeat_existing_pid "$who" 2>/dev/null || true)"
         fi
-        [ -n "$pid" ] || pid="$BASHPID"
+        [ -n "$pid" ] || pid="$$"
         # roster target first — same reasoning as heartbeat start: --touch is
         # routinely called from panes that are not the agent's own.
         _surface=""; _target=""

@@ -39,7 +39,9 @@ case "${1:-status}" in
     # it dies, and CLEARS THE LOCK on exit so stop/crash leaves no stale gate.
     # KEEP-ALIVE: only respawn while at least one agent heartbeat is fresh.
     ( trap 'rm -rf "$LOCKDIR"' EXIT
-      echo "$BASHPID" > "$PIDFILE"    # the supervisor records ITS OWN pid
+      # Bash 3.2 (the macOS system bash) has no $BASHPID. Wait for the
+      # parent to record this background subshell's real pid via $!.
+      while [ ! -s "$PIDFILE" ]; do sleep 0.01; done
       while true; do
         date +%s > "$LOCKDIR/heartbeat"
         STITCHPAD_PAD_DIR="$PAD_DIR" bash "$STITCHPAD_HOME/bin/watch.sh" >>"$LOG" 2>&1
@@ -55,6 +57,8 @@ case "${1:-status}" in
         sleep 2
       done
     ) &
+    supervisor_pid=$!
+    echo "$supervisor_pid" > "$PIDFILE"
     disown
     sleep 0.3
     echo "started stitchpad watcher (pid $(cat "$PIDFILE" 2>/dev/null)); log: $LOG" ;;

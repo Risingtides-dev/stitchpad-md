@@ -116,6 +116,11 @@ react() {
   for m in "${members[@]}"; do
     IFS='|' read -r name adapter wake target <<< "$m"
     [ -n "$name" ] || continue
+    # `pull` means the runtime's real lifecycle hook owns delivery. Never spawn
+    # an external adapter for it: that creates a hidden second agent lane and
+    # makes the operator's visible terminal cease to be the source of truth.
+    # The watcher exists only for explicit push targets (herdr/Velocity/etc.).
+    [ "$wake" = "pull" ] && continue
     # Fire ONLY if there's an UNANSWERED mention — the same engagement gate the
     # hook wake uses (a @name newer than name's last @-reply). `wake --peek` prints
     # the pending message iff unanswered and does NOT advance any cursor.
