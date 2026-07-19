@@ -35,6 +35,24 @@ sp_find_pad() {
   return 1
 }
 
+# Keep the entire pad out of the surrounding project's Git worktree. The pad
+# has its own isolated Git history; if the outer repo sees stitchpad.md as an
+# untracked file, `git stash -u` temporarily removes it while live writers keep
+# running and can recreate a headerless pad. Use info/exclude so existing repos
+# become safe without requiring a tracked .gitignore edit.
+sp_ensure_outer_git_ignore() {
+  local proj prefix exclude pattern
+  proj="$(dirname "$PAD_DIR")"
+  git -C "$proj" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  prefix="$(git -C "$proj" rev-parse --show-prefix 2>/dev/null || true)"
+  exclude="$(git -C "$proj" rev-parse --git-path info/exclude 2>/dev/null || true)"
+  [ -n "$exclude" ] || return 0
+  case "$exclude" in /*) ;; *) exclude="$proj/$exclude" ;; esac
+  pattern="/${prefix}.stitchpad/"
+  mkdir -p "$(dirname "$exclude")" 2>/dev/null || return 0
+  grep -Fqx "$pattern" "$exclude" 2>/dev/null || printf '\n# stitchpad runtime (isolated history)\n%s\n' "$pattern" >> "$exclude"
+}
+
 sp_init_paths() {
   # Resolution order for which pad we operate on:
   #   1. explicit arg ($1)            — caller passed a dir
@@ -47,6 +65,7 @@ sp_init_paths() {
   PAD_GIT="$PAD_DIR/stitchpad-git"
   PAD_STATE="$PAD_DIR/.state"
   mkdir -p "$PAD_STATE/sessions"
+  sp_ensure_outer_git_ignore
   # Pad git is load-bearing (read --new deltas, say auto-commits, compaction
   # audit trail) but NOTHING ever initialized it — sp_commit just no-ops when
   # it's absent, so a pad without it degrades silently. Self-heal on first use.
@@ -174,8 +193,12 @@ sgit() { git --git-dir="$PAD_GIT" --work-tree="$PAD_DIR" "$@"; }
 sp_commit() {
   local msg="$1"
   sgit rev-parse --git-dir >/dev/null 2>&1 || return 0
-  sgit diff --quiet -- stitchpad.md 2>/dev/null && return 0
-  sgit add stitchpad.md 2>/dev/null || true
+  # Never turn a transient outer-repo stash/clean window into a durable pad
+  # deletion. Stage first so a file recreated after an older deletion is not
+  # invisible as "untracked" to `git diff`, then inspect the staged delta.
+  [ -f "$PAD_MD" ] || return 0
+  sgit add -A -- stitchpad.md 2>/dev/null || return 0
+  sgit diff --cached --quiet -- stitchpad.md 2>/dev/null && return 0
   sgit commit -q -m "$msg" 2>/dev/null || true
 }
 

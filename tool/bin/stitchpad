@@ -56,7 +56,7 @@ sp_autostart_name() {
 sp_maybe_start_heartbeat() {
   [ "${STITCHPAD_HEARTBEAT_AUTOSTART:-1}" = "0" ] && return 0
   case "$cmd" in
-    init|heartbeat|hook|bind-session|whoami|leave|stop|daemon|watch|migration-check|reset|compact|help|-h|--help) return 0 ;;
+    init|heartbeat|hook|bind-session|whoami|leave|stop|daemon|watch|migration-check|reset|compact|restore-roster|help|-h|--help) return 0 ;;
   esac
   sp_init_paths >/dev/null 2>&1 || return 0
   local who
@@ -112,16 +112,49 @@ EOF
     printf '*\n!stitchpad.md\n' > "$dir/stitchpad-git/info/exclude"
     git --git-dir="$dir/stitchpad-git" --work-tree="$dir" add stitchpad.md
     git --git-dir="$dir/stitchpad-git" --work-tree="$dir" commit -q -m "stitchpad created"
-    # gitignore runtime state in the project repo if there is one
+    # The entire pad is runtime state with its own isolated Git history. Ignore
+    # it from the outer repo so `git stash -u` / `git clean` cannot temporarily
+    # remove stitchpad.md while agents and the bridge are still writing.
     if [ -f "$PWD/.gitignore" ]; then
-      grep -q '.stitchpad/.state' "$PWD/.gitignore" 2>/dev/null || printf '\n# stitchpad runtime\n.stitchpad/.state/\n.stitchpad/stitchpad-git/\n' >> "$PWD/.gitignore"
+      grep -Fqx '.stitchpad/' "$PWD/.gitignore" 2>/dev/null || printf '\n# stitchpad runtime (isolated history)\n.stitchpad/\n' >> "$PWD/.gitignore"
     fi
+    PAD_DIR="$dir"; sp_ensure_outer_git_ignore; unset PAD_DIR
     echo "✓ stitchpad #$name created at $md"
     # Self-sufficient from creation: start this pad's wake watcher now so it's live
     # the moment it exists (pinned to this pad regardless of cwd). join also ensures
     # it; this just means a fresh pad is ready before the first agent even joins.
     STITCHPAD_PAD_DIR="$dir" ensure_watcher 2>/dev/null \
       && echo "✓ wake watcher started for #$name"
+    ;;
+
+  restore-roster)
+    # Internal bridge recovery primitive. Restore a saved roster under the same
+    # mutation lock as say/join and re-check after locking, so two repairers can
+    # never prepend duplicate headers or overwrite a concurrent message.
+    sp_init_paths || exit 1
+    backup="${1:?usage: stitchpad restore-roster <roster-backup-file>}"
+    [ -f "$backup" ] || { echo "stitchpad: roster backup not found: $backup" >&2; exit 1; }
+    grep -q '^```roster[[:space:]]*$' "$backup" 2>/dev/null \
+      || { echo "stitchpad: invalid roster backup" >&2; exit 1; }
+    sp_lock || exit 1
+    if [ -f "$PAD_MD" ] && grep -q '^```roster[[:space:]]*$' "$PAD_MD" 2>/dev/null; then
+      sp_unlock
+      echo "stitchpad: roster already present"
+      exit 0
+    fi
+    body="$(mktemp)"; tmp="$(mktemp "$PAD_DIR/.stitchpad-repair.XXXXXX")"
+    [ -f "$PAD_MD" ] && cat "$PAD_MD" > "$body"
+    {
+      printf '# 🧵 #%s — agent stitchpad\n\n' "$(basename "$(dirname "$PAD_DIR")")"
+      cat "$backup"
+      printf '\n\n---\n\n'
+      cat "$body"
+    } > "$tmp"
+    mv "$tmp" "$PAD_MD"
+    rm -f "$body"
+    sp_commit "repair: restore missing roster header"
+    sp_unlock
+    echo "✓ roster restored from $backup"
     ;;
 
   join)
@@ -674,6 +707,16 @@ PY
       fi
     fi
 
+    # Hold the mutation lock while reading the roster and appending. A missing
+    # or headerless file must fail closed: appending would recreate a pad with no
+    # members, silently strip @all, and make every mention unwakeable.
+    sp_lock || exit 1
+    if [ ! -f "$PAD_MD" ] || ! grep -q '^```roster[[:space:]]*$' "$PAD_MD" 2>/dev/null; then
+      sp_unlock
+      echo "stitchpad: pad roster is missing — refusing to post; restore stitchpad.md from its isolated history" >&2
+      exit 1
+    fi
+
     # @all expansion: "@all" → every roster member, minus the sender, minus any
     # "-@name" exclusions in the message. So "@all -@ernie -@Jill hey" wakes
     # everyone except ernie and Jill. The -@name tokens are stripped from the
@@ -699,7 +742,6 @@ PY
       text="$(printf '%s' "${mentions# } $(printf '%s' "$cleaned" | sed -E 's/^[[:space:]]+//')")"
     fi
     ts="$(date '+%I:%M %p')"
-    sp_lock || exit 1
     printf '\n## %s · %s\n\n%s\n' "@$from" "$ts" "$text" >> "$PAD_MD"
     sp_commit "$from: $(printf '%s' "$text" | tr '\n' ' ' | cut -c1-60)"
     # Posting IS the reply — clear both dropped-turn markers (the pending re-block

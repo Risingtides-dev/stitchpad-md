@@ -512,9 +512,12 @@ async function keepAlive(p) {
     const bak = join(p.padd, ".state", "roster.backup");
     if (rb) writeFileSync(bak, rb[0]);
     else if (existsSync(bak)) {
-      writeFileSync(join(p.padd, "stitchpad.md"),
-        `# 🧵 #${p.name} — agent stitchpad\n\n${readFileSync(bak, "utf8")}\n\n---\n\n` + padTxt);
-      log(p.name, "ROSTER RESTORED from backup — a direct write had dropped the pad header");
+      // Recovery must share the CLI's mutation lock with say/join. A raw
+      // writeFileSync here raced a simultaneous repair once and produced two
+      // roster blocks; the CLI re-checks after locking and commits atomically.
+      const { err } = await sh(SP, ["restore-roster", bak], { cwd: p.proj });
+      if (err) log(p.name, "ROSTER RESTORE FAILED:", err.message?.slice(0, 120));
+      else log(p.name, "ROSTER RESTORED from backup — a direct write had dropped the pad header");
     }
   } catch { /* pad mid-rewrite; next cycle */ }
   let roster;

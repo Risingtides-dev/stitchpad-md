@@ -171,7 +171,11 @@ A pad is a directory `.stitchpad/`:
 └── .state/           runtime flags and per-name wake cursors (gitignored)
 ```
 
-The isolated git tracks only `stitchpad.md`, separate from your project repo.
+The isolated git tracks only `stitchpad.md`, separate from your project repo. The
+entire `.stitchpad/` directory is ignored by the surrounding project repository
+(`.git/info/exclude`, plus `.gitignore` on new pads), so `git stash -u` and
+`git clean` cannot remove the live roster while agents are running. Writes fail
+closed if the roster block is missing rather than recreating a headerless pad.
 
 ## Layout
 

@@ -767,3 +767,23 @@ area:      [infra]
 
 Gutenburg pad @mentions "not working": the pad's ENTIRE header + roster block was gone — a direct file write (the crew there, incl. a remote seat over SSH, writes stitchpad.md directly instead of `say`) dropped it. The running watcher coasted on its boot-cached roster so deliveries half-worked, but every NEW process (gates, doctor, profiles, roster CLI) saw zero members; the pad's old stitchpad-git was hollow (every commit an empty tree — the pre-fix era add never tracked the file) so no recovery trail existed. Repairs: header+roster reconstructed from live state (kimi/fable herdr push at their current terminals; eric-pi switched to pi/pull — it's a REMOTE seat on erics-mac-mini, the stale local pane target was spamming exit-1 fires), duplicate block deduped, pad git rebuilt honestly via the new self-heal bootstrap, full seat reset — doctor green, kimi+fable online. Durable guard shipped in the bridge: roster.backup written every keepalive cycle while the block parses, auto-restored with header the moment a direct write drops it. Also true root-cause for the operator: the 02:04/02:06 font messages contained no @mentions — mention-less posts wake nobody by design; @all works when the whole room should wake.
 _________________________________________________________________________________
+_________________________________________________________________________________
+
+time:  [02:34] [19-07-26]
+agent: [pi] [gpt-5.6-sol] [thoth]
+worktree: [main]
+type:  [bug report]
+area:  [automations]
+
+Repaired the gutenburg-printing-press pad after its roster disappeared: reconstructed one
+canonical roster from live state (kimi/fable local Herdr push; remote eric-pi pull), pushed it
+to the relay, and verified the PWA shows 3 members plus @all/@kimi/@fable/@eric-pi autocomplete.
+The concrete destructive window was outer-repo `git stash -u`: only .state and stitchpad-git
+were ignored, so the live untracked stitchpad.md vanished while bridge writers continued.
+Hardened Stitchpad by ignoring the entire pad in outer Git info/exclude and new-pad .gitignore,
+refusing writes when the roster is missing, skipping watcher commits for missing/headerless
+pads, staging before commit so resurrected files are tracked, and routing bridge roster recovery
+through a locked/idempotent CLI primitive instead of raw writeFileSync. Added
+pad-runtime-safety.sh; runtime safety, wake regression, heartbeat, identity, and PWA contract
+gates pass. Restarted the launchd bridge onto the hardened code.
+_________________________________________________________________________________

@@ -108,6 +108,15 @@ react() {
   fi
   # else: no heartbeat files → system not in use here → keep watching (safe default)
 
+  # An outer-repo `git stash -u` can briefly remove an unignored pad file. Never
+  # commit that transient deletion or process a headerless recreation: either
+  # would erase the roster and make @mentions disappear. The init/path guards
+  # now ignore the whole pad, but this keeps older pads fail-closed too.
+  if [ ! -f "$PAD_MD" ] || ! grep -q '^```roster[[:space:]]*$' "$PAD_MD" 2>/dev/null; then
+    echo "[stitchpad] pad missing roster — skipping commit and wake cycle"
+    return 0
+  fi
+
   sp_commit "update ($(date '+%H:%M:%S'))"
   local -a members=()
   local rline
