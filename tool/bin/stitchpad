@@ -1858,7 +1858,14 @@ except: print("")' 2>/dev/null)"
     _bridge_file="$PAD_STATE/bridge-heartbeat"
     if [ -f "$_bridge_file" ]; then
       _bridge_ts="$(jq -r '.ts // empty' "$_bridge_file" 2>/dev/null)"
-      _bridge_interval="$(jq -r '.interval // 3' "$_bridge_file" 2>/dev/null)"
+      # TASK-70: fall back to the SLOWEST known writer cadence, not the
+      # fastest. The polling bridge writes interval=3; the ws bridge writes
+      # 15. A writer that omits the field (as ws did) previously defaulted to
+      # 3 -> a 9s threshold -> a permanently-stale warning on a healthy
+      # bridge. Defaulting high can only delay a real staleness report by a
+      # few cycles; defaulting low cries wolf forever, and a health check
+      # nobody trusts is worse than none.
+      _bridge_interval="$(jq -r '.interval // 15' "$_bridge_file" 2>/dev/null)"
       if [ -n "$_bridge_ts" ]; then
         _bridge_ts_s="$(printf '%s' "$_bridge_ts" | sed 's/\.[0-9]*Z$/Z/')"
         _bridge_epoch="$(date -juf '%Y-%m-%dT%H:%M:%SZ' "$_bridge_ts_s" +%s 2>/dev/null || date -u -d "$_bridge_ts_s" +%s 2>/dev/null || echo 0)"

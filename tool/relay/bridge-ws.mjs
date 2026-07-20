@@ -657,7 +657,24 @@ setInterval(() => pads.forEach(p => pushPad(p, "sweep")), 45000); // presence/st
 setInterval(() => pads.forEach(p => p.ws?.readyState === 1 ? p.ws.send('{"type":"ping"}') : null), 25000);
 setInterval(() => pads.forEach(p => { if (!p.ws || p.ws.readyState !== 1) drainQueues(p); }), 30000);
 setInterval(() => pads.forEach(drainDmOut), 2000);                // agent DM replies
-// heartbeat file so `stitchpad doctor` can see the bridge is alive
+// heartbeat file so `stitchpad doctor` can see the bridge is alive.
+// `interval` is REQUIRED (TASK-70): doctor computes its staleness threshold as
+// interval*3 and falls back to 3s when the field is absent — so a healthy 15s
+// ws bridge was permanently reported stale against a 9s threshold. A health
+// check that always warns trains everyone to ignore doctor output, which is
+// exactly the tool we would have used to catch the wake-drop bug hours sooner.
+// Keep this constant and the setInterval period the same value.
+const HEARTBEAT_INTERVAL_MS = 15000;
 setInterval(() => pads.forEach(p => {
-  try { writeFileSync(join(p.padd, ".state", "bridge-heartbeat"), JSON.stringify({ ts: new Date().toISOString(), pad: p.name, mode: "ws" })); } catch {}
-}), 15000);
+  try {
+    writeFileSync(
+      join(p.padd, ".state", "bridge-heartbeat"),
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        pad: p.name,
+        mode: "ws",
+        interval: HEARTBEAT_INTERVAL_MS / 1000,
+      }),
+    );
+  } catch {}
+}), HEARTBEAT_INTERVAL_MS);
