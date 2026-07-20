@@ -3,6 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SP="$ROOT/tool/bin/stitchpad"
+export STITCHPAD_STEAL=1   # allow each case to claim the TTY from the prior case
+# Unset herdr context: in a managed pane, sp_this_surface returns a terminal id
+# that activates the one-terminal-one-pad lock, which blocks multi-sender test
+# scenarios. The test suite doesn't run inside herdr, but manual runs might.
+unset HERDR_PANE_ID 2>/dev/null || true
 
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
@@ -21,7 +26,9 @@ stop_watcher() {
   "$SP" daemon stop >/dev/null 2>&1 || true
   pkill -9 -f "fswatch.*$d" 2>/dev/null || true
   for _pidfile in "$d"/.stitchpad/.state/alive-ticker.*.pid "$d"/.stitchpad/.state/heartbeat.*.lock/pid; do
-    [ -f "$_pidfile" ] && read -r _pid < "$_pidfile" 2>/dev/null && kill -9 "$_pid" 2>/dev/null || true
+    [ -f "$_pidfile" ] || continue
+    _pid="$(timeout 2 cat "$_pidfile" 2>/dev/null || true)"
+    [ -n "$_pid" ] && kill -9 "$_pid" 2>/dev/null || true
   done
   sleep 0.2
 }
@@ -116,4 +123,290 @@ if contains "$sender_line" 'NEW from @larry'; then
   fail 'wake nudge incorrectly named recipient as sender'
 fi
 
-printf 'wake regression ok\n'
+	# Regression 6: FIFO cursor — two mentions from different senders are
+	# delivered in oldest-first order, not newest-first. A burst of "@agent A"
+	# then "@agent B" must wake on A's mention first, then B's on the next
+	# wake cycle. This is the fix for incident-2: codex's CLEAR was shadowed
+	# by ocean's later @fable, and the high-water-mark seen cursor leapt past it.
+	case6="$tmp/case6"
+	mkdir "$case6"
+	cd "$case6"
+	"$SP" init --name case6 >/dev/null
+	"$SP" join agent codex >/dev/null
+	stop_watcher "$case6"
+	STITCHPAD_NAME=tester "$SP" say '@agent oldest-first ping' >/dev/null
+	STITCHPAD_NAME=other "$SP" say '@agent second burst ping' >/dev/null
+	# --peek returns the OLDEST unanswered mention (tester's ping)
+	peek1="$("$SP" wake agent --peek)"
+	contains "$peek1" '@agent oldest-first ping' || fail 'FIFO: oldest mention not returned first'
+	# Consume it (non-peek advances seen cursor)
+	"$SP" wake agent >/dev/null
+	# Now the next oldest (other's ping) should surface
+	peek2="$("$SP" wake agent --peek)"
+	contains "$peek2" '@agent second burst ping' || fail 'FIFO: second mention not returned after consuming first'
+	if contains "$peek2" 'oldest-first ping'; then
+	  fail 'FIFO: already-delivered mention re-appeared'
+	fi
+
+	# Regression 7: Same-sender gate — replying to X clears X's gate
+	# but leaves Y's unanswered mention open. Regression for "replying to
+	# @alpha swallowed @beta's mention" (the incident-1 pattern).
+	case7="$tmp/case7"
+	mkdir "$case7"
+	cd "$case7"
+	"$SP" init --name case7 >/dev/null
+	"$SP" join agent codex >/dev/null
+	stop_watcher "$case7"
+	STITCHPAD_NAME=alpha "$SP" say '@agent alpha mentions agent' >/dev/null
+	STITCHPAD_NAME=beta "$SP" say '@agent beta also mentions agent' >/dev/null
+	# Both mentions active — oldest (alpha's) is first in queue
+	p1="$("$SP" wake agent --peek)"
+	contains "$p1" 'alpha mentions agent' || fail 'same-sender: alpha mention not found'
+	# Consume alpha's mention
+	"$SP" wake agent >/dev/null
+	# Agent replies to alpha — should clear alpha's mention gate
+	STITCHPAD_NAME=agent "$SP" say '@alpha thanks for the ping' >/dev/null
+	# Beta's mention should STILL be awake (not swallowed by replying to alpha)
+	p2="$("$SP" wake agent --peek)"
+	contains "$p2" 'beta also mentions agent' || fail 'same-sender: replying to alpha swallowed beta mention'
+	# Consume beta's mention
+	"$SP" wake agent >/dev/null
+	# Now agent replies to beta
+	STITCHPAD_NAME=agent "$SP" say '@beta acknowledged' >/dev/null
+	# Both gates should be clear
+	p3="$("$SP" wake agent --peek)"
+	[ -z "$p3" ] || fail 'same-sender: gate not cleared after replying to both senders'
+
+	# Regression 8: --peek-ordinal stamps the correct open-mention ordinal
+	# independent of the seen cursor. The ordinal is gate-derived and must
+	# match what a non-peek wake would deliver. Verifies the watch.sh pending
+	# stamp wire produces the same ordinal the wake loop will consume.
+	case8="$tmp/case8"
+	mkdir "$case8"
+	cd "$case8"
+	"$SP" init --name case8 >/dev/null
+	"$SP" join agent codex >/dev/null
+	stop_watcher "$case8"
+	STITCHPAD_NAME=sender "$SP" say '@agent peek-ordinal test' >/dev/null
+	ord1="$("$SP" wake agent --peek-ordinal)"
+	[ -n "$ord1" ] || fail '--peek-ordinal returned empty for open mention'
+	[ "$ord1" -gt 0 ] || fail '--peek-ordinal returned zero ordinal for open mention'
+	# --peek-ordinal must not advance seen
+	wake1="$("$SP" wake agent --peek)"
+	contains "$wake1" 'peek-ordinal test' || fail '--peek-ordinal consumed the gate (must be read-only)'
+	# Consume, then --peek-ordinal should be empty (no open mention)
+	"$SP" wake agent >/dev/null
+	ord2="$("$SP" wake agent --peek-ordinal)"
+	[ -z "$ord2" ] && ord2=0
+	[ "$ord2" -eq 0 ] || fail '--peek-ordinal returned non-zero after all mentions consumed'
+
+
+	# Regression 9: Invariant 5 — consumed-but-never-displayed recovery,
+	# production stop-hook lifecycle.
+	#
+	# Covers the full path: watcher stamps pending + consumes seen → turn crashes
+	# → stop-hook validates via sp_engagement(since=N-1) independently of seen →
+	# re-presents via --force <N> → transitions to delivered_no_reply →
+	# an authored say clears the marker.
+	case9="$tmp/case9"
+	mkdir "$case9"
+	cd "$case9"
+	"$SP" init --name case9 >/dev/null
+	"$SP" join agent codex >/dev/null
+	stop_watcher "$case9"
+
+	# Post two mentions from different senders
+	STITCHPAD_NAME=fable "$SP" say '@agent first mention' >/dev/null
+	STITCHPAD_NAME=smaths "$SP" say '@agent second mention - CRITICAL' >/dev/null
+
+	# Consume first (ordinal 1, seen → 1)
+	"$SP" wake agent >/dev/null
+	[ "$(cat "$case9/.stitchpad/.state/seen.agent")" -eq 1 ] || fail 'invariant5: seen != 1 after first consume'
+
+	# Stamp pending with ordinal 2 (watcher stamps BEFORE consuming second)
+	po="$("$SP" wake agent --peek-ordinal)"
+	[ "$po" -eq 2 ] || fail "invariant5: --peek-ordinal should be 2, got $po"
+	printf '%s' "$po" > "$case9/.stitchpad/.state/pending.agent"
+
+	# Consume second (ordinal 2, seen → 2)
+	"$SP" wake agent >/dev/null
+	[ "$(cat "$case9/.stitchpad/.state/seen.agent")" -eq 2 ] || fail 'invariant5: seen != 2 after second consume'
+
+	# Turn crashed — normal wake sees nothing (seen advanced past both)
+	peek_after="$("$SP" wake agent --peek)"
+	[ -z "$peek_after" ] || fail 'invariant5: normal wake should be silent after both consumed'
+
+	# --peek-ordinal bakes in seen cursor → returns 0 (since=seen=2, nothing > 2)
+	# This is the core defect: the hook CANNOT use --peek-ordinal to validate the
+	# pending ordinal. Instead it uses sp_engagement(since=pend_ord-1).
+	po2="$("$SP" wake agent --peek-ordinal)"
+	[ "${po2:-0}" -eq 0 ] || fail "invariant5: --peek-ordinal should be 0 after both consumed, got $po2"
+
+	# Production hook validation: sp_engagement(since=pend_ord-1) bypasses seen
+	_pord="$(cat "$case9/.stitchpad/.state/pending.agent")"
+	source "$STITCHPAD_HOME/bin/lib.sh"
+	PAD_MD="$case9/.stitchpad/stitchpad.md"
+	PAD_STATE="$case9/.stitchpad/.state"
+	PAD_DIR="$case9/.stitchpad"
+	_chk="$(sp_engagement agent "$((_pord - 1))" 2>/dev/null || echo "0 x 0 x")"
+	_chk_ord="$(printf '%s' "$_chk" | awk '{print $1}')"
+	[ "${_chk_ord:-0}" = "${_pord:-x}" ] || fail "invariant5: sp_engagement(since=$((_pord-1))) = $_chk_ord, expected $_pord"
+	unset PAD_MD PAD_STATE PAD_DIR
+
+	# The actual stop-hook subcommand (production path)
+	STITCHPAD_CWD="$case9" "$SP" bind-session agent-session agent >/dev/null
+	hook_out="$(printf '{"cwd":"%s","session_id":"agent-session","stop_hook_active":false}' "$case9" | "$SP" hook 2>/dev/null)"
+	contains "$hook_out" '"decision":"block"' || fail 'invariant5: stop hook did not re-block'
+	contains "$hook_out" 'second mention - CRITICAL' || fail 'invariant5: stop hook missed the critical message'
+	if contains "$hook_out" 'first mention'; then
+	  fail 'invariant5: stop hook recovered wrong (old first) mention'
+	fi
+
+	# delivered_no_reply marker set after re-block
+	[ -f "$case9/.stitchpad/.state/delivered_no_reply.agent" ] || fail 'invariant5: delivered_no_reply not set'
+	[ "$(cat "$case9/.stitchpad/.state/delivered_no_reply.agent")" = "$_pord" ] || fail 'invariant5: delivered_no_reply ordinal mismatch'
+
+	# pending is consumed (deleted by hook after re-block)
+	[ ! -f "$case9/.stitchpad/.state/pending.agent" ] || fail 'invariant5: pending should be consumed after re-block'
+
+	# An authored say clears delivered_no_reply
+	STITCHPAD_NAME=agent "$SP" say '@smaths got it, thanks' >/dev/null
+	[ ! -f "$case9/.stitchpad/.state/delivered_no_reply.agent" ] || fail 'invariant5: delivered_no_reply not cleared after say'
+
+	# Regression 10: Watcher DEFER — production proof.
+	# When pending.<name> exists (unresolved crash recovery target), the
+	# watcher must defer the ENTIRE fire/consume cycle. Uses a non-pull
+	# adapter (herdr, wake=push) so the watcher enters the defer branch
+	# rather than skipping at the "pull" guard on line 132.
+	#
+	# Regression 11: Hook preserves pending when DND suppresses --force.
+	#
+	# Regression 12: Adapter FAILURE clears pending — no delivery means
+	# no crash recovery target, so the stamp must be cleared to prevent
+	# the next watcher cycle from deferring forever (the deadlock bug).
+
+	# --- Regression 10: Watcher defer-or-queue (production) ---
+	case10="$tmp/case10"
+	mkdir "$case10"
+	cd "$case10"
+	"$SP" init --name case10 >/dev/null
+	"$SP" join agent herdr push >/dev/null     # push adapter, NOT pull
+	stop_watcher "$case10"
+
+	# Build: one mention consumed (seen=1), second stamped pending=2 then
+	# consumed (turn crashed), third mention posted — watcher must defer.
+	STITCHPAD_NAME=fable "$SP" say '@agent first mention' >/dev/null
+	"$SP" wake agent >/dev/null                                      # seen=1
+	STITCHPAD_NAME=smaths "$SP" say '@agent second - CRITICAL' >/dev/null
+	printf '2' > "$case10/.stitchpad/.state/pending.agent"           # crash stamp
+	"$SP" wake agent >/dev/null                                      # seen=2
+	STITCHPAD_NAME=other "$SP" say '@agent third mention' >/dev/null
+
+	# Start watcher backgrounded, CAPTURE output, trigger fswatch.
+	"$SP" watch > "$case10/watcher.out" 2>&1 &
+	WATCH_PID=$!
+	sleep 0.5
+	printf '\n' >> "$case10/.stitchpad/stitchpad.md"
+	sleep 1.5
+	kill -9 $WATCH_PID 2>/dev/null || true
+	wait $WATCH_PID 2>/dev/null || true
+	pkill -9 -f "fswatch.*$case10" 2>/dev/null || true
+	rm -rf "$case10/.stitchpad/.state/watch.lock.d" 2>/dev/null || true
+
+	# Assert: the DEFER branch actually RAN (deferring line present).
+	grep -q 'deferring.*pending recovery target.*ordinal 2' "$case10/watcher.out" \
+	  || fail 'invariant5: watcher did NOT defer — branch not exercised'
+
+	# Assert: NO adapter was fired (defer happened before --peek).
+	! grep -q 'firing' "$case10/watcher.out" \
+	  || fail 'invariant5: watcher fired adapter despite pending — defer broken'
+
+	# Assert: pending was NOT overwritten (still ordinal 2).
+	_p10="$(cat "$case10/.stitchpad/.state/pending.agent" 2>/dev/null || echo 0)"
+	[ "${_p10:-0}" -eq 2 ] || fail "invariant5: watcher overwrote pending; expected 2, got $_p10"
+
+	# Assert: seen did NOT advance past the deferred mention.
+	_s10="$(cat "$case10/.stitchpad/.state/seen.agent" 2>/dev/null || echo 0)"
+	[ "${_s10:-0}" -le 2 ] || fail "invariant5: watcher consumed deferred mention; seen=$_s10 (>2)"
+
+	# --- Regression 11: Hook preserves pending under DND ---
+	case11="$tmp/case11"
+	mkdir "$case11"
+	cd "$case11"
+	"$SP" init --name case11 >/dev/null
+	"$SP" join agent codex >/dev/null
+	stop_watcher "$case11"
+
+	# Consume one mention (seen=1), stamp pending=1, turn crashes.
+	STITCHPAD_NAME=fable "$SP" say '@agent critical message' >/dev/null
+	printf '1' > "$case11/.stitchpad/.state/pending.agent"
+	"$SP" wake agent >/dev/null                                      # seen=1
+
+	# Enable DND for agent (wake --force exits 0 silently).
+	touch "$case11/.stitchpad/.state/dnd.agent"
+
+	# Bind a session and invoke the stop-hook PRODUCTION path.
+	STITCHPAD_CWD="$case11" "$SP" bind-session agent-session agent >/dev/null
+	hook_out="$(printf '{"cwd":"%s","session_id":"agent-session","stop_hook_active":false}' "$case11" | "$SP" hook 2>/dev/null || true)"
+
+	# Assert: hook did NOT re-block (DND suppressed --force output → msgs empty).
+	if contains "$hook_out" 'decision.*block'; then
+	  fail 'invariant5: hook re-blocked under DND — should have exited silently'
+	fi
+
+	# Assert: pending STILL EXISTS (defer-not-destroy — hook left it intact).
+	[ -f "$case11/.stitchpad/.state/pending.agent" ] || fail 'invariant5: hook deleted pending under DND — should preserve it'
+
+	# Assert: delivered_no_reply was NOT created (never recovered the message).
+	[ ! -f "$case11/.stitchpad/.state/delivered_no_reply.agent" ] || fail 'invariant5: hook wrote delivered_no_reply under DND without recovering'
+
+	# --- Regression 12: Adapter failure clears pending (production) ---
+	case12="$tmp/case12"
+	mkdir "$case12"
+	cd "$case12"
+	"$SP" init --name case12 >/dev/null
+	"$SP" join agent test-fail push >/dev/null    # push adapter that always exits 1
+	stop_watcher "$case12"
+
+	# Post a mention and start the watcher — the test-fail adapter exits 1,
+	# so fire_adapter returns failure. The watcher must create then CLEAR
+	# the pending stamp (no delivery = nothing to recover from crash).
+	STITCHPAD_NAME=fable "$SP" say '@agent delivery test' >/dev/null
+
+	# Watcher captures output; trigger TWO fswatch events to prove
+	# both cycles ran (adapter failure -> clear -> retry -> clear again).
+	"$SP" watch > "$case12/watcher.out" 2>&1 &
+	WATCH_PID=$!
+	sleep 0.5
+
+	# EVENT 1: trigger fswatch, adapter fails, pending cleared.
+	printf '\n' >> "$case12/.stitchpad/stitchpad.md"
+	sleep 1.5
+	[ ! -f "$case12/.stitchpad/.state/pending.agent" ] \
+	  || fail 'invariant5: pending not cleared after event-1 adapter failure'
+	_s12_1="$(cat "$case12/.stitchpad/.state/seen.agent" 2>/dev/null || echo 0)"
+	[ "${_s12_1:-0}" -eq 0 ] \
+	  || fail "invariant5: seen advanced after event-1 failure; seen=$_s12_1"
+
+	# EVENT 2: trigger fswatch again — same mention is still unanswered,
+	# watcher must fire adapter again (no deadlock from stale pending).
+	printf '\n' >> "$case12/.stitchpad/stitchpad.md"
+	sleep 1.5
+	[ ! -f "$case12/.stitchpad/.state/pending.agent" ] \
+	  || fail 'invariant5: pending not cleared after event-2 adapter failure'
+	_s12_2="$(cat "$case12/.stitchpad/.state/seen.agent" 2>/dev/null || echo 0)"
+	[ "${_s12_2:-0}" -eq 0 ] \
+	  || fail "invariant5: seen advanced after event-2 failure; seen=$_s12_2"
+
+	kill -9 $WATCH_PID 2>/dev/null || true
+	wait $WATCH_PID 2>/dev/null || true
+	pkill -9 -f "fswatch.*$case12" 2>/dev/null || true
+	rm -rf "$case12/.stitchpad/.state/watch.lock.d" 2>/dev/null || true
+
+	# Assert: TWO adapter failure calls (branch ran twice, not once,
+	# not zero — proves event 2 retried instead of deferring forever).
+	_failcount="$(grep -c 'exit 1 (not consuming gate)' "$case12/watcher.out" 2>/dev/null || echo 0)"
+	[ "${_failcount:-0}" -ge 2 ] \
+	  || fail "invariant5: expected >=2 adapter-failure calls, got $_failcount"
+
+	printf 'wake regression ok\n'

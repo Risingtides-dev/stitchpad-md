@@ -294,7 +294,7 @@ EOF
     # message ordinals and every agent's wake cursor stay valid.
     perl -i -pe 's/\@\Q'"$old"'\E(?![A-Za-z0-9_-])/\@'"$new"'/g' "$PAD_MD"
     # per-agent state files keyed by name
-    for _pfx in seen seen.relay delivered delivered.relay carry count alive role level runtime forcewake dnd delivered_no_reply; do
+    for _pfx in seen seen.relay count alive role level runtime forcewake dnd delivered_no_reply; do
       [ -f "$PAD_STATE/$_pfx.$old" ] && mv "$PAD_STATE/$_pfx.$old" "$PAD_STATE/$_pfx.$new" 2>/dev/null
     done
     # session bindings + sticky autonames hold the NAME as file content
@@ -345,7 +345,7 @@ EOF
     }
     _reset_scrub_ghost() {   # remove every trace of a name no longer in the roster
       local who="$1" _pfx _f
-      for _pfx in seen seen.relay delivered delivered.relay carry count role level runtime forcewake dnd delivered_no_reply; do
+      for _pfx in seen seen.relay count role level runtime forcewake dnd delivered_no_reply; do
         rm -f "$PAD_STATE/$_pfx.$who" 2>/dev/null
       done
       for _f in "$PAD_STATE"/sessions/* "$PAD_STATE"/autoname.*; do
@@ -356,7 +356,7 @@ EOF
     _reset_seat() {          # roster member: fresh ticker + re-armable wake
       local who="$1" target
       _reset_kill_ticker "$who"
-      rm -f "$PAD_STATE/seen.$who" "$PAD_STATE/delivered.$who" "$PAD_STATE/forcewake.$who" "$PAD_STATE/delivered_no_reply.$who" 2>/dev/null
+      rm -f "$PAD_STATE/seen.$who" "$PAD_STATE/forcewake.$who" "$PAD_STATE/delivered_no_reply.$who" 2>/dev/null
       target="$(sp_user_field "$who" target)"
       if [ -n "$target" ] && [ "$target" != "-" ]; then
         STITCHPAD_NAME="$who" STITCHPAD_HEARTBEAT_PARENT_PID=0 \
@@ -465,27 +465,6 @@ con.execute("UPDATE snapshots SET msg_count=? WHERE gen=?", (len(msgs), gen))
 con.commit()
 PY
     [ $? -eq 0 ] || { sp_unlock; echo "stitchpad: archive write failed — pad untouched" >&2; exit 1; }
-    # CARRY DEBT (TASK-66): every mention that is unanswered AND undelivered at
-    # this moment must survive the rewrite by IDENTITY. Record hash|author|snippet
-    # per roster member; the wake gate serves these before anything positional and
-    # deletes each on delivery. Without this, one reply after the compact buries
-    # every unread pre-compact mention forever (the dropped @fable CLEARs).
-    # (plain file-fed loops on purpose — nested pipe-while subshells silently
-    # swallowed iterations here; see the BUG HISTORY note in watch.sh)
-    _cnames="$(mktemp)"; _cands="$(mktemp)"
-    sp_roster | cut -d'|' -f1 | tr -d ' ' > "$_cnames"
-    while IFS= read -r _cn; do
-      [ -n "$_cn" ] || continue
-      sp_engagement "$_cn" --list | awk -F'|' -v n="$_cn" 'BEGIN{r=0} $1=="R"{r=$2+0} $1=="M" && ($2+0)>r {print n "|" $2 "|" $3 "|" $4}' >> "$_cands"
-    done < "$_cnames"
-    while IFS='|' read -r _cn _co _chh _caa; do
-      [ -n "$_chh" ] || continue
-      grep -qxF "$_chh" "$PAD_STATE/delivered.$_cn" 2>/dev/null && continue
-      grep -q "^$_chh|" "$PAD_STATE/carry.$_cn" 2>/dev/null && continue
-      _csn="$(sp_block_at "$_co" | grep -v '^## ' | grep -v '^[[:space:]]*$' | head -1 | sed 's/^[[:space:]]*//' | tr -d '|' | cut -c1-120)"
-      printf '%s|%s|%s\n' "$_chh" "$_caa" "$_csn" >> "$PAD_STATE/carry.$_cn"
-    done < "$_cands"
-    rm -f "$_cnames" "$_cands"
     prev_sum="$(awk '/^<!-- compact:/{f=1;next} /^<!-- \/compact -->/{f=0;next} f' "$PAD_MD")"
     span_file="$(mktemp)"; sed -n "$((head_end+1)),$((cut_line-1))p" "$PAD_MD" > "$span_file"
     # open ```task blocks from the archived span ride through the compaction
@@ -516,7 +495,7 @@ PY
       printf '\n'
       sed -n "${cut_line},\$p" "$PAD_MD"
     } > "$tmp" && mv "$tmp" "$PAD_MD"
-    rm -f "$PAD_STATE"/seen.* 2>/dev/null   # legacy ordinal cursors; delivered.* rings survive compaction BY DESIGN (identity hashes)
+    rm -f "$PAD_STATE"/seen.* 2>/dev/null
     sp_commit "compact: gen $gen — $arch_count msgs → archive (keep $keep)"
     _h="$(sgit rev-parse HEAD 2>/dev/null || true)"
     if [ -n "$_h" ]; then for _f in "$PAD_STATE"/readref.*; do [ -f "$_f" ] && printf '%s' "$_h" > "$_f"; done; fi
@@ -579,7 +558,7 @@ PY
     sp_system "@$who left the stitchpad"
     sp_commit "roster: - $who"
     # also release any file claims and wake state this agent held
-    rm -f "$PAD_STATE/seen.$who" "$PAD_STATE/delivered.$who" "$PAD_STATE/forcewake.$who" 2>/dev/null
+    rm -f "$PAD_STATE/seen.$who" "$PAD_STATE/forcewake.$who" 2>/dev/null
     for _ld in "$PAD_STATE"/claims/*.d; do
       [ -d "$_ld" ] && read -r _h _ < "$_ld/holder" 2>/dev/null && [ "$_h" = "$who" ] && rm -rf "$_ld"
     done
@@ -1207,7 +1186,7 @@ PY
     #   stitchpad wake [name] [--peek] [--relay]
     # name defaults to the joined identity. Relay mode may run on a coworker's
     # machine with no local .stitchpad checkout, so it uses global hook state.
-    relay_mode=0; peek=0; ordinal_only=0; force=0; who=""
+    relay_mode=0; peek=0; ordinal_only=0; force=0; force_ord=0; who=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --peek) peek=1; shift ;;
@@ -1215,11 +1194,17 @@ PY
         # exit, never advancing seen. Used by watch.sh to stamp pending.<name> so
         # the stop-hook can recover a dropped turn in the same ordinal currency.
         --peek-ordinal) ordinal_only=1; peek=1; shift ;;
-        # --force: bypass the seen cursor (still honors the engagement gate:
-        # mention>reply). Emits the wake message for an OPEN mention even if already
-        # delivered. The stop-hook's dropped-turn recovery uses this to re-present a
-        # mention whose seen cursor was consumed by a turn that died before posting.
-        --force) force=1; peek=1; shift ;;
+        # --force [<ordinal>]: bypass the seen cursor (still honors the engagement
+        # gate: mention>reply). Without an ordinal, finds the first open mention
+        # (since=0). With an ordinal N, uses since=N-1 to target exactly that
+        # mention — the stop-hook's dropped-turn recovery uses this to re-present
+        # a specific consumed mention (read from pending.<name>).
+        --force) force=1; peek=1; shift
+          # If next arg is a plain number, it's the target ordinal.
+          if [ $# -gt 0 ] && printf '%s' "$1" | grep -qx '[0-9][0-9]*'; then
+            force_ord="$1"; shift
+          fi
+          ;;
         --relay) relay_mode=1; shift ;;
         *) [ -z "$who" ] && who="$1"; shift ;;
       esac
@@ -1265,68 +1250,56 @@ except Exception:
     # the watch.sh daemon auto-commits as "update (HH:MM:SS)" and clobbers the
     # authored subject the old git-based gate relied on, so it could never see my
     # replies and looped forever. sp_engagement walks "## @author" blocks: prints
-    # "<last_mention_to_me> <last_reply_by_me>" as ordinals; my own blocks never
-    # count as mentions (author-skip built in). Blocked iff mention > reply.
-    # IDENTITY-CURSOR GATE (TASK-66). Ordinal cursors died on every compaction
-    # rewrite: a reply posted after a compact compared new small ordinals against
-    # rewritten positions and closed the gate over UNREAD pre-compact mentions
-    # (the dropped @fable CLEARs). The gate now works on STABLE message identity:
-    #   - sp_engagement --list emits every unanswered-candidate mention as
-    #     M|ordinal|hash|author (hash = author+body, survives compaction) plus
-    #     R|last_reply_ordinal.
-    #   - delivered.<name> is a ring of hashes already presented once.
-    # Invariants (codex spec): deliver exactly once; never replay; never advance
-    # past an undelivered mention — the OLDEST undelivered fires first, and the
-    # ring only ever grows by the hash actually delivered.
-    _elist="$(sp_engagement "$who" --list)"
-    last_reply_by_me="$(printf '%s\n' "$_elist" | awk -F'|' '$1=="R"{print $2}')"
-    _unanswered="$(printf '%s\n' "$_elist" | awk -F'|' -v r="${last_reply_by_me:-0}" '$1=="M" && $2>r {print $2 "|" $3 "|" $4}')"
-    # relay mode tracked its cursor separately before; same split for the ring
-    _ring="$PAD_STATE/delivered.$who"
-    [ "$relay_mode" -eq 1 ] && _ring="$PAD_STATE/delivered.relay.$who"
-    # CARRY DEBT: compaction records every mention that was undelivered AND
-    # unanswered at rewrite time (hash|author|snippet in carry.<name>). A reply
-    # posted after the compact must not bury them — carry entries stay eligible
-    # by IDENTITY until delivered, regardless of pad position.
-    _carry="$PAD_STATE/carry.$who"
-    _carry_pick=""
-    if [ -f "$_carry" ]; then
-      while IFS='|' read -r _ch _ca _cs; do
-        [ -n "$_ch" ] || continue
-        grep -qxF "$_ch" "$_ring" 2>/dev/null && continue
-        _carry_pick="$_ch|$_ca|$_cs"; break
-      done < "$_carry"
+    # "<first_mention_after_seen> <mention_sender> <last_reply_by_me> <reply_target>".
+    # FIFO cursor: pass `seen` as the `since` parameter — returns the oldest
+    # unanswered mention after the current delivery cursor, stepping one ordinal
+    # per delivery instead of jumping past burst middles.
+    # NOTE: relay mode already set seen_file to seen.relay.<who> above — do NOT
+    # overwrite it back to the local cursor, or the remote wake collides with the
+    # local one and silently never fires (the henry bug). Only default if unset.
+    [ -n "${seen_file:-}" ] || seen_file="$PAD_STATE/seen.$who"
+    seen=0; [ -f "$seen_file" ] && seen="$(cat "$seen_file" 2>/dev/null || echo 0)"
+    # --force bypasses the seen cursor: pass since=0 (find first open mention)
+    # or since=force_ord-1 (target exactly that ordinal for stop-hook recovery).
+    _since="$seen"
+    if [ "$force" -eq 1 ]; then
+      if [ "$force_ord" -gt 0 ]; then
+        _since=$((force_ord - 1))   # target exactly this mention
+      else
+        _since=0                    # find first open mention
+      fi
     fi
-    [ -n "$_unanswered" ] || [ -n "$_carry_pick" ] || exit 0   # nothing owed → nothing to do
-    # --peek-ordinal: gate open → non-empty output (doctor keys on that); the
-    # newest unanswered ordinal when positional, the word "carried" otherwise.
-    if [ "$ordinal_only" -eq 1 ]; then
-      if [ -n "$_unanswered" ]; then printf '%s' "$(printf '%s\n' "$_unanswered" | tail -1 | cut -d'|' -f1)"; else printf 'carried'; fi
-      exit 0
+    read -r oldest_mention_to_me mention_sender last_reply_by_me reply_target <<<"$(sp_engagement "$who" "$_since")"
+    [ "${oldest_mention_to_me:-0}" -eq 0 ] && exit 0   # no unanswered mention after seen → nothing to do
+    # REPLY-CLEARS-GATE narrowed to same-sender: my reply only clears the gate
+    # when it's directed at the SAME sender who mentioned me. Replying to X no
+    # longer swallows Y's unanswered mention.
+    if [ "${last_reply_by_me:-0}" -gt "$oldest_mention_to_me" ] \
+       && [ -n "${mention_sender:-}" ] && [ -n "${reply_target:-}" ] \
+       && [ "$reply_target" = "$mention_sender" ]; then
+      exit 0   # my reply to the SAME sender is newer than their mention → handled
     fi
-    # pick: carry debt first (oldest obligation), then oldest undelivered positional
-    _pick=""; _pick_ord=""; _pick_hash=""; _sender=""; _snip=""
-    if [ -n "$_carry_pick" ]; then
-      _pick_hash="${_carry_pick%%|*}"; _rest="${_carry_pick#*|}"; _sender="${_rest%%|*}"; _snip="${_rest#*|}"
-      _pick="carry"
-    else
-      while IFS='|' read -r _mo _mh _ma; do
-        [ -n "$_mh" ] || continue
-        if [ "$force" -eq 1 ] || ! grep -qxF "$_mh" "$_ring" 2>/dev/null; then _pick="$_mo|$_mh|$_ma"; break; fi
-      done <<SPEOF
-$_unanswered
-SPEOF
-      [ -n "$_pick" ] || exit 0   # every unanswered mention already presented once — no nagging
-      _pick_ord="${_pick%%|*}"; _rest="${_pick#*|}"; _pick_hash="${_rest%%|*}"; _sender="${_rest#*|}"
+    # --peek-ordinal: gate is open (mention unanswered) → print the ordinal, done.
+    # Uses the already-computed oldest_mention_to_me from sp_engagement; independent
+    # of the seen cursor on purpose. Pending stamps answer "owes a reply" while
+    # seen answers "already nudged". They answer different questions.
+    if [ "$ordinal_only" -eq 1 ]; then printf '%s' "$oldest_mention_to_me"; exit 0; fi
+    # WAKE-ONCE with FIFO stepping: the seen cursor was already passed as `since`
+    # to sp_engagement, which returned the first mention > seen. When we deliver
+    # (non-peek), advance seen to exactly this mention's ordinal. The next wake
+    # will find the next mention > this one. --peek never advances seen.
+    # --force bypasses the seen gate (delivers even if already seen).
+    if [ "$force" -eq 0 ] && [ "$oldest_mention_to_me" -le "${seen:-0}" ]; then
+      exit 0   # already delivered this mention; not nagging (--force bypasses this)
     fi
     if sp_dnd_is_on "$who"; then
-      exit 0   # muted locally; ring + carry untouched so the mention queues for return
+      exit 0   # muted locally; leave seen untouched so the mention queues
     fi
-    if [ "$_pick" != "carry" ]; then
-      _latest="$(sp_block_at "$_pick_ord")"
-      _snip="$(printf '%s\n' "$_latest" | grep -v '^## ' | grep -v '^[[:space:]]*$' | head -1 | sed 's/^[[:space:]]*//' | cut -c1-120)"
-    fi
+    # Unanswered → compact one-liner wake message (no "untrusted" alarm noise).
+    _latest="$(sp_latest_to "$who" "$_since")"
+    _sender="$(printf '%s\n' "$_latest" | sed -n 's/^## @\([^ ]*\).*/\1/p' | head -1)"
     [ -n "$_sender" ] || _sender="$who"
+    _snip="$(printf '%s\n' "$_latest" | grep -v '^## ' | grep -v '^[[:space:]]*$' | head -1 | sed 's/^[[:space:]]*//' | cut -c1-120)"
     # context discipline: point at the WINDOWED read, never the raw file — the
     # pad grows unbounded and "read the whole file" invites an 80K-token cat.
     printf 'stitchpad: NEW from @%s — %s — reply with @%s (context: `stitchpad read --new` for unread only, `stitchpad read -n 40` for the recent window — do NOT cat stitchpad.md)\n' "$_sender" "$_snip" "$_sender"
@@ -1346,16 +1319,7 @@ SPEOF
         printf 'ticket discipline: %s referenced on the pad with NO ticket — whoever owns them must run `stitchpad task new "<title>" --to <name> --desc "<scope>"` (ids follow automatically).\n' "$_phantom"
       fi
     fi
-    # mark delivered by IDENTITY: append the presented hash to the ring (last 100
-    # kept). Peek never records. Survives compaction; nothing else may write here.
-    if [ "$peek" -eq 0 ]; then
-      { tail -n 99 "$_ring" 2>/dev/null; printf '%s\n' "$_pick_hash"; } > "$_ring.tmp" && mv "$_ring.tmp" "$_ring"
-      # a delivered carry entry is debt repaid — drop it from the carry file
-      if [ "$_pick" = "carry" ] && [ -f "$_carry" ]; then
-        grep -v "^$_pick_hash|" "$_carry" > "$_carry.tmp" 2>/dev/null; mv "$_carry.tmp" "$_carry"
-        [ -s "$_carry" ] || rm -f "$_carry"
-      fi
-    fi
+    [ "$peek" -eq 0 ] && printf '%s' "$oldest_mention_to_me" > "$seen_file"   # mark delivered: FIFO steps one ordinal per delivery
     exit 0
     ;;
 
@@ -1434,29 +1398,36 @@ except: print("")' 2>/dev/null)"
       [ -z "$who" ] && exit 0
       msgs="$("$0" wake ${who:+"$who"} 2>/dev/null || true)"
       # DROPPED-TURN RECOVERY (local mode only). The normal wake above respects the
-      # seen cursor, so a mention already pushed by the watcher returns nothing —
+      # seen cursor, so a mention already consumed by the watcher returns nothing —
       # correct for a legitimately-silent turn, WRONG for a turn that died mid-tool
-      # before posting (smaths then sees silence). pending.<who> was stamped by
-      # watch.sh with the delivered ordinal. If it's still set AND the engagement
-      # gate is STILL open at the SAME ordinal (no reply posted), re-block ONCE via
-      # 'wake --force' (bypasses the consumed seen cursor, gate still holds).
+      # before posting (the human sees silence). pending.<who> was stamped by
+      # watch.sh with the delivered ordinal. If it's still set AND the gate is
+      # STILL open at the SAME ordinal (no reply posted), re-present ONCE via
+      # 'wake --force' (bypasses the consumed seen cursor).
       #
-      # VISIBILITY (dennis's acceptance gap): the re-block is bounded to one shot,
-      # but if that retry ALSO produces no reply we must not lose it silently — that
-      # was the whole bug. So we don't just delete pending: we TRANSITION it to
-      # delivered_no_reply.<who> (carrying the ordinal). That marker is surfaced by
-      # doctor/TUI and cleared only by an actual authored reply (in the `say` path).
-      # Net: at most one re-block (no loop), but a persistently-dropped mention stays
-      # VISIBLE instead of vanishing. A genuinely newer mention supersedes it.
+      # SUCCESS-GATED TRANSITION: only delete pending and write delivered_no_reply
+      # when the targeted recovery actually produces output. If --force returns
+      # empty (DND active, gate closed, etc.), leave pending intact so the next
+      # hook cycle can retry. This is the defer-not-destroy property: a suppressed
+      # recovery attempt must not consume the one-shot re-block bound.
       _pend="$PAD_STATE/pending.$who"
       if [ -z "$msgs" ] && [ -f "$_pend" ]; then
         _pend_ord="$(cat "$_pend" 2>/dev/null || echo 0)"
-        _open_ord="$("$0" wake "$who" --peek-ordinal 2>/dev/null || echo 0)"
-        rm -f "$_pend" 2>/dev/null   # consume the re-block bound regardless
-        if [ -n "$_open_ord" ] && [ "${_open_ord:-0}" -gt 0 ] && [ "${_open_ord:-0}" = "${_pend_ord:-x}" ]; then
-          msgs="$("$0" wake "$who" --force 2>/dev/null || true)"
-          # mark delivered-but-unanswered so a second silent drop stays visible
-          printf '%s' "$_open_ord" > "$PAD_STATE/delivered_no_reply.$who" 2>/dev/null || true
+        # Validate independently of seen via sp_engagement(since=_pend_ord-1).
+        if [ "$_pend_ord" -gt 0 ] 2>/dev/null; then
+          _chk="$(sp_engagement "$who" "$((_pend_ord - 1))" 2>/dev/null || echo "0 x 0 x")"
+          _chk_ord="$(printf '%s' "$_chk" | awk '{print $1}')"
+          if [ "${_chk_ord:-0}" = "${_pend_ord:-x}" ]; then
+            _recovered="$("$0" wake "$who" --force "$_pend_ord" 2>/dev/null || true)"
+            if [ -n "$_recovered" ]; then
+              # Recovery succeeded → one-shot re-block consumed, mark visible.
+              rm -f "$_pend" 2>/dev/null
+              msgs="$_recovered"
+              printf '%s' "$_pend_ord" > "$PAD_STATE/delivered_no_reply.$who" 2>/dev/null || true
+            fi
+            # Recovery failed (DND, empty output): leave pending intact.
+            # Next hook cycle re-validates and retries.
+          fi
         fi
       fi
     fi

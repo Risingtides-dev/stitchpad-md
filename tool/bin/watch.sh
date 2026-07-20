@@ -53,13 +53,13 @@ for _m in "${SEED[@]}"; do
 done
 
 fire_adapter() {
-  local name="$1" adapter="$2" wake="$3" target="$4"
+  local name="$1" adapter="$2" wake="$3" target="$4" since="${5:-0}"
   local script="$ADAPTER_DIR/$adapter.sh"
   if [ ! -f "$script" ]; then
     echo "[stitchpad] no adapter '$adapter' for @$name (looked in $ADAPTER_DIR)"; return 2
   fi
   local taskfile; taskfile="$(mktemp)"
-  sp_latest_to "$name" > "$taskfile"
+  sp_latest_to "$name" "$since" > "$taskfile"
   local rc=0
   # Per-agent force-wake: if .state/forcewake.<name> exists, bypass the adapter's
   # focus-guard for this agent (wake even when its window is focused). Used for the
@@ -140,13 +140,48 @@ react() {
     # don't re-fire the SAME mention forever waiting for a reply. A genuinely newer
     # mention (higher ordinal) still fires. This is the structural loop-killer: an
     # agent can legitimately go silent (no post needed) and the gate is satisfied.
+    # INVARIANT 5 — defer-or-queue: if a pending stamp already exists
+    # (an unresolved recovery target from a prior cycle whose agent turn
+    # may have crashed), defer the ENTIRE later fire/consume. Do not
+    # overwrite, do not fire a newer mention over an unresolved one.
+    # The existing pending ordinal will be resolved by the stop-hook;
+    # the next watcher cycle then handles the new mention naturally.
+    _existing_pending=0
+    [ -f "$PAD_STATE/pending.$name" ] && _existing_pending="$(cat "$PAD_STATE/pending.$name" 2>/dev/null || echo 0)"
+    if [ "${_existing_pending:-0}" -gt 0 ]; then
+      echo "[stitchpad] deferring @$name — pending recovery target (ordinal $_existing_pending) unresolved" >&2
+      continue
+    fi
+
     if [ -n "$("$BIN_DIR/stitchpad" wake "$name" --peek 2>/dev/null)" ]; then
       echo "[stitchpad] unanswered @$name -> firing ${adapter} (${wake})"
-      if fire_adapter "$name" "$adapter" "$wake" "$target"; then
+      # Stamp pending.<name> with the open mention ordinal BEFORE firing.
+      # If the adapter's turn dies (crash, timeout, abort), the stop-hook
+      # reads this ordinal and re-presents the mention via --force.
+      # Uses --peek-ordinal (gate-derived, NEVER consumed) so the stamp
+      # is always the SAME ordinal the wake saw — not a shifted cursor.
+      _pend_ord="$("$BIN_DIR/stitchpad" wake "$name" --peek-ordinal 2>/dev/null)"
+      if [ -n "$_pend_ord" ]; then
+        printf '%s' "$_pend_ord" > "$PAD_STATE/pending.$name"
+      fi
+      # Pass the current seen cursor to fire_adapter so sp_latest_to returns
+      # the same mention that sp_engagement found (FIFO-aligned).
+      _seen=0; [ -f "$PAD_STATE/seen.$name" ] && _seen="$(cat "$PAD_STATE/seen.$name" 2>/dev/null || echo 0)"
+      if fire_adapter "$name" "$adapter" "$wake" "$target" "$_seen"; then
         # consume only if the adapter actually delivered (focus-guard/defer returns
         # 0 too, but it logs a defer and leaves the prompt untouched — re-firing on
         # the next pad change is correct there, so we key off the wake's own output)
         "$BIN_DIR/stitchpad" wake "$name" >/dev/null 2>&1 || true
+        # INVARIANT 5: do NOT clear the pending stamp here. The adapter consumed
+        # the wake, but the agent's turn may crash before the human sees it.
+        # The stamp survives until the stop-hook confirms the agent completed a
+        # turn (the stop-hook clears it) or the next watcher cycle re-stamps it.
+      else
+        # Adapter delivery FAILED: the stamp was created for crash recovery after
+        # a successful delivery. If delivery never happened, the stamp is a
+        # dead-lock trigger — the next watcher cycle sees pending and defers
+        # forever. Clear it so the next cycle retries naturally.
+        rm -f "$PAD_STATE/pending.$name" 2>/dev/null || true
       fi
     fi
   done
