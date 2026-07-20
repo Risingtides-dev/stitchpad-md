@@ -338,25 +338,38 @@ sp_latest_to() {
 # addressed reply. Lets agents post acknowledgements/status without costing anyone a
 # wake. Sender opt-in, no content guessing.
 sp_engagement() {
-  local who="$1"
+  local who="$1" mode="${2:-}"
   # roster names, for the implicit-silent word list below: only AGENT authors get
   # their bare "ack"/"noted" posts silenced. A human operator typing "@pi ack"
   # means "wake pi" — guessing it silent made operator pings vanish (the pi bug).
   local agents
   agents="$(sp_roster 2>/dev/null | cut -d'|' -f1 | tr 'A-Z' 'a-z' | paste -sd, -)"
-  awk -v who="$(printf '%s' "$1" | tr 'A-Z' 'a-z')" -v agents="$agents" '
+  awk -v who="$(printf '%s' "$1" | tr 'A-Z' 'a-z')" -v agents="$agents" -v mode="$mode" '
     # An ADDRESS is "@name" at line-start or after whitespace — NOT after punctuation
     # like / ` " (), so a quoted/referenced "@name" (e.g. "the @john/@dale discussion")
     # or a backticked `@name` does not count as addressing someone. buf joins lines with
     # a leading space, so (^|[ \t]) covers block-start, every line-start, and mid-sentence.
     function body_mentions(name,   re) { re="(^|[ \t])@(" name "|all)([^a-z0-9_-]|$)"; return (buf ~ re) }
+    # STABLE MESSAGE IDENTITY: djb2 over author + normalized body + length.
+    # Ordinals are positions in the CURRENT file and die on every compaction
+    # rewrite (the TASK-66 wake drops); the hash survives because compaction
+    # copies kept blocks byte-identically. Cursor state stores hashes only.
+    function dj(s,   h, i, c) {
+      h = 5381
+      for (i = 1; i <= length(s); i++) { c = ord[substr(s, i, 1)]; if (c == "") c = 1; h = (h * 33 + c) % 4294967296 }
+      return sprintf("%x-%d", h, length(s))
+    }
     function flush() {
       if (author=="") return
       n++
       if (author==who) {                                                          # my own block:
         if (silent || buf ~ /(^|[ \t])@[a-z0-9_-]/) last_reply=n                 # a silent ack OR a real @-address reply clears my gate
-      } else if (!silent && body_mentions(who)) last_mention=n                    # a silent post by another never wakes me; a real address does
+      } else if (!silent && body_mentions(who)) {                                 # a silent post by another never wakes me; a real address does
+        last_mention=n
+        if (mode == "--list") mlist[++mn] = n "|" dj(author "|" buf) "|" author
+      }
     }
+    BEGIN { for (i = 32; i < 127; i++) ord[sprintf("%c", i)] = i }
     /^## @/ {
       flush()
       a=$2; sub(/^@/,"",a); author=tolower(a); buf=""; silent=0; seen_body=0; infence=0
@@ -384,8 +397,20 @@ sp_engagement() {
     # snippets from counting as an address. Real addresses survive because only the
     # backtick-delimited content is blanked, not the surrounding text.
     { line = tolower($0); gsub(/`[^`]*`/, " ", line); buf = buf " " line }
-    END { flush(); print (last_mention+0) " " (last_reply+0) }
+    END {
+      flush()
+      if (mode == "--list") {
+        print "R|" (last_reply+0)
+        for (i = 1; i <= mn; i++) print "M|" mlist[i]
+      } else print (last_mention+0) " " (last_reply+0)
+    }
   ' "$PAD_MD"
+}
+
+# Print message block N (1-indexed "## @" block) — the wake snippet source for
+# a SPECIFIC mention, not just the latest one.
+sp_block_at() {
+  awk -v want="$1" '/^## @/ { n++ } n == want { print } n > want { exit }' "$PAD_MD"
 }
 
 # ── Terminal-identity locks (machine-global) ─────────────────────────
@@ -417,6 +442,13 @@ sp_term_lock_claim() { # $1=target/surface $2=name — refuses on a live foreign
   if [ -n "$cur" ]; then
     IFS='|' read -r pad name ts <<<"$cur"
     now="$(date +%s)"
+    # the OPERATOR lock is a shield, not a claim — no freshness window, no
+    # takeover except an explicit STITCHPAD_STEAL. Agents never bind the
+    # operator's own terminal.
+    if [ "$name" = "operator" ] && [ "${STITCHPAD_STEAL:-0}" != "1" ]; then
+      echo "stitchpad: REFUSED — terminal $surface is the OPERATOR's. Agents don't bind it." >&2
+      return 1
+    fi
     if { [ "$pad" != "$PAD_DIR" ] || [ "$name" != "$who" ]; } \
        && [ $((now - ${ts:-0})) -lt 300 ] && [ "${STITCHPAD_STEAL:-0}" != "1" ]; then
       echo "stitchpad: REFUSED — terminal $surface is live as @$name in $pad. One terminal = one pad. 'stitchpad leave $name' there first, or STITCHPAD_STEAL=1 to take it over." >&2
