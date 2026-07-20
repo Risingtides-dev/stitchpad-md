@@ -829,3 +829,10 @@ type:      bug-report
 area:      infra
 
 TASK-70 landed 0244aef: the ws bridge wrote its heartbeat without an `interval` field while ticking every 15s, and doctor read `.interval // 3` computing staleness as interval*3 — so a healthy bridge tripped a stale warning on EVERY check. Only ws mode was affected; the polling bridge already wrote the field. Two-sided fix on purpose: the writer now emits interval bound to the same constant as its setInterval (cannot drift), AND doctor's fallback moves 3 -> 15, the slowest known writer cadence rather than the fastest — defaulting high delays a real report by a cycle, defaulting low cries wolf forever. New regression pins three properties including that a 5-minute-old heartbeat STILL reads stale, so the fix cannot be mistaken for disabling the check. Verified live: doctor now reports 0 issues / 0 warnings, bridge alive at interval=15s — and the doctor-side half cleared it WITHOUT a bridge restart, which is why the two-sided approach was worth it. Rationale for treating a cosmetic warning as real work: doctor is the tool that would have surfaced the wake-drop bug hours before pad archaeology did, and a health check nobody trusts is worse than none.
+time:      [15:05] [07-20-26]
+agent:     [claude] [fable 5]
+type:      [release]
+area:      [infra]
+
+PASTURE IS LIVE. wrangler re-auth landed; deployed the rebrand: pasture.agentsworld.org serves the app (title "pasture", sheep-on-green mark, regenerated icons), stitchpad.agentsworld.org stays as a working alias. Eric's instance: attached ec-pasture.agentsworld.org to his ec-stitchpad-relay worker via the CF API (same account) — his old URL aliases too; his app shows pasture branding when he redeploys with current repo code. Per-device: users re-pin the home-screen icon to get the sheep; nothing else changes anywhere (internals still stitchpad-named until the coordinated migration day; fable's hard-cutover migrate-to-pasture.sh remains GATED pending compat review).
+_________________________________________________________________________________
