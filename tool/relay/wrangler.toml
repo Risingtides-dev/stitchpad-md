@@ -3,7 +3,8 @@ main = "worker.js"
 compatibility_date = "2026-06-01"
 
 routes = [
-  { pattern = "stitchpad.agentsworld.org", custom_domain = true }
+  { pattern = "stitchpad.agentsworld.org", custom_domain = true },
+  { pattern = "pasture.agentsworld.org", custom_domain = true }
 ]
 
 # wrangler kv namespace create STITCHPAD  → paste id below

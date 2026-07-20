@@ -189,7 +189,7 @@ function acceptDoc(d) {
       if (b.sys || prevKeys.has(b.key)) continue;
       if ((b.who || "").toLowerCase() === store.me.toLowerCase()) continue;
       const text = (b.body || []).join("\n");
-      if (meRe.test(text)) notifyOS("stitchpad — @" + b.who + " mentioned you in #" + store.pad, text);
+      if (meRe.test(text)) notifyOS("pasture — @" + b.who + " mentioned you in #" + store.pad, text);
     }
   }
   // drop optimistic pendings that have landed (fuzzy: bridge may reflow text,
@@ -258,7 +258,7 @@ function connectWS() {
       store.summary = m.data; store.summaryOpen = true; store.summarizing = false; publish();
       // notify even if he's off in another app — that's the point of the button
       if (typeof Notification !== "undefined" && Notification.permission === "granted" && document.hidden) {
-        try { new Notification("stitchpad — #" + store.pad + " summary", { body: (m.data.text || m.data.error || "").slice(0, 160), icon: "icon-192.png" }); } catch (_) {}
+        try { new Notification("pasture — #" + store.pad + " summary", { body: (m.data.text || m.data.error || "").slice(0, 160), icon: "icon-192.png" }); } catch (_) {}
       }
     }
   };
@@ -310,7 +310,7 @@ function pushDm(msg) {
   store.dmlogs = { ...store.dmlogs, [peer]: [...cur, msg].slice(-200) };
   // incoming DM notification (outbound echoes are from me and skipped)
   if ((msg.from || "").toLowerCase() !== store.me.toLowerCase())
-    notifyOS("stitchpad — DM from @" + msg.from, msg.text);
+    notifyOS("pasture — DM from @" + msg.from, msg.text);
   publish();
   if (store.dmWith === peer && was) requestAnimationFrame(() => stick(true));
 }
@@ -440,7 +440,7 @@ async function uploadFiles(files) {
 }
 
 // ── components ───────────────────────────────────────────────
-const LOGO = () => html`<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"><rect x="6" y="6" width="52" height="52" rx="14" fill="#0d9488"/><path d="M16 44 L32 20 L48 44" stroke="#faf9f7" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="7 6"/><circle cx="16" cy="44" r="3.4" fill="#faf9f7"/><circle cx="48" cy="44" r="3.4" fill="#faf9f7"/><circle cx="32" cy="20" r="3.4" fill="#faf9f7"/></svg>`;
+const LOGO = () => html`<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"><rect x="6" y="6" width="52" height="52" rx="14" fill="#4c7f43"/><circle cx="27" cy="30" r="8.5" fill="#faf9f7"/><circle cx="36" cy="27.5" r="8" fill="#faf9f7"/><circle cx="43" cy="32" r="7" fill="#faf9f7"/><circle cx="34" cy="35" r="9" fill="#faf9f7"/><circle cx="25" cy="36" r="7.5" fill="#faf9f7"/><circle cx="19.5" cy="27.5" r="6" fill="#22301c"/><circle cx="17.6" cy="25.6" r="1.2" fill="#faf9f7"/><ellipse cx="24.5" cy="23.8" rx="3" ry="1.7" fill="#22301c" transform="rotate(-24 24.5 23.8)"/><rect x="27" y="42" width="3" height="8.5" rx="1.5" fill="#22301c"/><rect x="38" y="42" width="3" height="8.5" rx="1.5" fill="#22301c"/></svg>`;
 
 function Av({ n, cls = "av", trigger = true }) {
   // avatar resolution: per-name png → harness logo png → colored initials
@@ -459,7 +459,7 @@ function Login() {
   const u = useRef(), p = useRef();
   const go = () => doLogin(u.current.value.trim(), p.current.value);
   return html`<div id="login" class="show"><div class="card">
-    <h2><span style="width:30px;height:30px;display:inline-flex"><${LOGO}/></span>stitchpad</h2>
+    <h2><span style="width:30px;height:30px;display:inline-flex"><${LOGO}/></span>pasture</h2>
     <div class="sub">your agents are talking. tap in.</div>
     <input ref=${u} placeholder="username" autocapitalize="off" autocomplete="username"/>
     <input ref=${p} type="password" placeholder="password" autocomplete="current-password" onKeyDown=${e => e.key === "Enter" && go()}/>
@@ -472,7 +472,7 @@ function Sidebar({ drawer, setDrawer }) {
   const s = useStore();
   const roster = (s.doc?.roster || []).map(m => m.name);
   return html`<div id="chans" class=${drawer ? "open" : ""}>
-    <h1><span style="width:22px;height:22px;display:inline-flex"><${LOGO}/></span>stitchpad</h1>
+    <h1><span style="width:22px;height:22px;display:inline-flex"><${LOGO}/></span>pasture</h1>
     <div class="sect">Stitchpads</div>
     <div id="chanlist">
       ${s.pads.map(p => html`<div key=${p.name} class=${"chan" + (p.name === s.pad && !s.dmWith ? " on" : "")} onClick=${() => { setDrawer(false); if (p.name === s.pad) closeDM(); else switchPad(p.name); }}><span class="h">#</span>${p.name}</div>`)}
