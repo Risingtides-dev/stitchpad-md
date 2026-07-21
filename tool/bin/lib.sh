@@ -226,7 +226,12 @@ sp_roster() {
       n=split(line, f, /[ \t]*\|[ \t]*/)
       if (n>=2) {
         name=f[1]; adapter=f[2];
-        wake=(n>=3?f[3]:"pull"); target=(n>=4?f[4]:"-");
+        # crews annotate models as a 3rd column (name|adapter|MODEL|wake|target)
+        # — tolerate it: if col3 is not a wake mode, shift wake/target right.
+        # (The ocean-os crew invented this and the strict parser read "push" as
+        # a TERMINAL ID, minting a lock literally named push — never again.)
+        if (n>=5 && f[3] !~ /^(push|pull)$/) { wake=f[4]; target=f[5] }
+        else { wake=(n>=3?f[3]:"pull"); target=(n>=4?f[4]:"-") }
         gsub(/^[ \t]+|[ \t]+$/, "", name)
         print name "|" adapter "|" wake "|" target
       }
