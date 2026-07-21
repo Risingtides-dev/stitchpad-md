@@ -17,6 +17,7 @@
 #   stitchpad reset [name]                repair a wedged seat (or whole pad): zombie tickers, stale locks, wake cursors
 #   stitchpad compact [--keep N]          archive old transcript to sqlite, replace with rolling summary block
 #   stitchpad search <query> [-n N]       full-history search: live pad + compaction archive
+#   stitchpad shift-change --save <n> --file <f>   agent hands itself off to a fresh session (bridge clears + rebriefs)
 #   stitchpad who                         alias for roster
 #   stitchpad log [-n N]                  show recent history (git log)
 #
@@ -502,6 +503,55 @@ PY
     sp_unlock
     rm -f "$span_file" "$carried"
     echo "✓ compact gen $gen: $arch_count messages → archive.sqlite, kept $keep + open tasks + rolling summary"
+    ;;
+
+  shift-change)
+    # Fresh-context handoff, compact-smooth. An agent writes its own next-session
+    # invocation as its LAST act; we store it durably in the pad's sqlite; the
+    # bridge waits for the seat's pane to go IDLE (never mid-turn), injects the
+    # runtime's clear command (/clear claude, /new codex), then pastes the
+    # handoff into the fresh chat. Exactly-once: pending → delivering → delivered.
+    #   stitchpad shift-change --save <name> --file <path>    agent saves its handoff
+    #   stitchpad shift-change --claim <id>                   bridge: pending→delivering, prints body path
+    #   stitchpad shift-change --mark <id> <status>           bridge: delivered / pending (retry)
+    #   stitchpad shift-change --list                         pending/delivering rows
+    sp_init_paths || exit 1
+    db="$PAD_STATE/archive.sqlite"
+    /usr/bin/sqlite3 "$db" "CREATE TABLE IF NOT EXISTS handoffs(id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT NOT NULL, at TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', delivered_at TEXT);"
+    case "${1:-}" in
+      --save)
+        who="${2:?usage: shift-change --save <name> --file <path>}"
+        [ "${3:-}" = "--file" ] && [ -f "${4:-}" ] || { echo "stitchpad: need --file <path>" >&2; exit 1; }
+        [ "$(wc -c < "$4")" -le 32768 ] || { echo "stitchpad: handoff too large (32KB cap)" >&2; exit 1; }
+        python3 - "$db" "$who" "$4" <<'PY'
+import sqlite3, sys, datetime
+db, who, f = sys.argv[1:4]
+con = sqlite3.connect(db)
+con.execute("INSERT INTO handoffs(agent, at, body) VALUES(?,?,?)",
+            (who, datetime.datetime.now().isoformat(timespec="seconds"), open(f, encoding="utf-8", errors="replace").read()))
+con.commit()
+PY
+        echo "✓ shift-change queued for @$who — finish your turn now; the bridge clears the session once idle and delivers this into the fresh chat"
+        ;;
+      --claim)
+        hid="${2:?usage: shift-change --claim <id>}"
+        _n="$(/usr/bin/sqlite3 "$db" "UPDATE handoffs SET status='delivering', at='$(date '+%Y-%m-%dT%H:%M:%S')' WHERE id=${hid//[!0-9]/} AND status IN ('pending','delivering'); SELECT changes();")"
+        [ "${_n:-0}" -ge 1 ] || { echo "stitchpad: handoff $hid not claimable" >&2; exit 1; }
+        _bf="$PAD_STATE/shift.$hid.txt"
+        /usr/bin/sqlite3 "$db" "SELECT body FROM handoffs WHERE id=${hid//[!0-9]/};" > "$_bf"
+        printf '%s\n' "$_bf"
+        ;;
+      --mark)
+        hid="${2:?}"; st="${3:?delivered|pending}"
+        case "$st" in delivered|pending) ;; *) echo "bad status" >&2; exit 1;; esac
+        _da=""; [ "$st" = "delivered" ] && _da=", delivered_at='$(date '+%Y-%m-%dT%H:%M:%S')'"
+        /usr/bin/sqlite3 "$db" "UPDATE handoffs SET status='$st'$_da WHERE id=${hid//[!0-9]/};"
+        rm -f "$PAD_STATE/shift.${hid//[!0-9]/}.txt" 2>/dev/null
+        ;;
+      --list|*)
+        /usr/bin/sqlite3 -separator '|' "$db" "SELECT id, agent, status, at FROM handoffs WHERE status IN ('pending','delivering') ORDER BY id;"
+        ;;
+    esac
     ;;
 
   search)

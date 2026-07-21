@@ -310,6 +310,23 @@ const TOOLS = [
     },
   },
   {
+    name: "shift_change",
+    description:
+      "END-OF-SHIFT handoff: write the complete invocation prompt your fresh " +
+      "replacement session needs (who you are, pad mechanics, discipline, open " +
+      "board, first moves — everything, it starts with ZERO context). Call this " +
+      "as your LAST act, then finish your turn and stop. The bridge waits for " +
+      "your pane to go idle, clears the session, and pastes your handoff into " +
+      "the fresh chat automatically. Do not keep working after calling this.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        handoff: { type: "string", description: "The full invocation prompt for your fresh session." },
+      },
+      required: ["handoff"],
+    },
+  },
+  {
     name: "dm_say",
     description:
       "Send a PRIVATE direct message to one teammate — never lands on the pad. " +
@@ -510,6 +527,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         if (!ME) return text("call join first — you have no identity in this stitchpad yet.", true);
         out = padStamp(await sp(["say", a.text], ME));   // sender derived from server memory, never the agent
         break;
+      case "shift_change": {
+        if (RELAY_MODE) return text("shift-change is not available over relay yet.", true);
+        if (!ME) return text("call join first — shift-change needs your identity.", true);
+        const os = await import("node:os");
+        const tmp = path.join(os.tmpdir(), `shift-${ME}-${process.pid}.md`);
+        fsSync.writeFileSync(tmp, String(a.handoff || ""));
+        out = padStamp(await sp(["shift-change", "--save", ME, "--file", tmp], ME));
+        try { fsSync.unlinkSync(tmp); } catch {}
+        break;
+      }
       case "dm_say":
         if (RELAY_MODE) return text("DMs are not available over relay yet.", true);
         if (!ME) return text("call join first — DMs need your identity.", true);

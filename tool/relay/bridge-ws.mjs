@@ -649,6 +649,63 @@ async function healTargets() {
 }
 setInterval(healTargets, 90000);
 
+// SHIFT-CHANGE delivery: an agent saved its next-session invocation (handoffs
+// table, status=pending). We act ONLY when its pane is IDLE — never mid-turn —
+// then: /clear|/new → wait for the fresh prompt → paste the handoff → settle
+// Enter. Exactly-once via the sqlite state machine; a 'delivering' row older
+// than 4 minutes is assumed crashed and retried.
+const SHIFT_CLEAR = { claude: "/clear", codex: "/new" };
+const SHIFT_BUSY = new Set(); // "<pad>:<agent>" in-flight this process
+async function shiftSweep() {
+  let panes = null;
+  for (const [, p] of pads) {
+    const db = join(p.padd, ".state", "archive.sqlite");
+    if (!existsSync(db)) continue;
+    let rows = "";
+    try { rows = (await sh("/usr/bin/sqlite3", ["-separator", "|", db, "SELECT id, agent, status, at FROM handoffs WHERE status IN ('pending','delivering');"])).stdout.trim(); } catch { continue; }
+    if (!rows) continue;
+    for (const line of rows.split("\n")) {
+      const [id, agent, status, at] = line.split("|");
+      if (!id || !agent) continue;
+      const key = `${p.name}:${agent}`;
+      if (SHIFT_BUSY.has(key)) continue;
+      if (status === "delivering" && Date.now() - Date.parse(at || 0) < 4 * 60e3) continue; // someone's on it
+      let runtime = ""; try { runtime = readFileSync(join(p.padd, ".state", "runtime." + agent), "utf8").trim(); } catch {}
+      const clearCmd = SHIFT_CLEAR[runtime];
+      if (!clearCmd) { log(p.name, `shift-change @${agent}: runtime '${runtime || "?"}' has no clear command — leaving pending`); continue; }
+      if (!panes) {
+        try { panes = JSON.parse((await sh(HERDR, ["pane", "list"])).stdout)?.result?.panes || []; } catch { panes = []; }
+      }
+      let roster = ""; try { roster = (await sh(SP, ["roster"], { cwd: p.proj })).stdout; } catch {}
+      const row = roster.split("\n").find(l => l.split("|")[0] === agent);
+      const term = (row || "").split("|")[3]?.split("@@").pop();
+      const pane = panes.find(x => x.terminal_id === term);
+      if (!pane) { log(p.name, `shift-change @${agent}: no live pane — waiting`); continue; }
+      if (pane.agent_status && pane.agent_status !== "idle") continue; // NEVER mid-turn
+      SHIFT_BUSY.add(key);
+      (async () => {
+        try {
+          const { stdout: bodyPath, err } = await sh(SP, ["shift-change", "--claim", id], { cwd: p.proj });
+          if (err || !bodyPath.trim()) throw new Error("claim failed");
+          const body = readFileSync(bodyPath.trim(), "utf8");
+          log(p.name, `shift-change @${agent}: clearing session (${clearCmd}) on ${pane.pane_id}`);
+          await sh(HERDR, ["pane", "run", pane.pane_id, clearCmd]);
+          await new Promise(r => setTimeout(r, 8000));          // fresh prompt settles
+          await sh(HERDR, ["pane", "run", pane.pane_id, body]);  // the handoff, pasted whole
+          await new Promise(r => setTimeout(r, 2500));
+          await sh(HERDR, ["pane", "run", pane.pane_id, ""]);    // settle-retry Enter
+          await sh(SP, ["shift-change", "--mark", id, "delivered"], { cwd: p.proj });
+          log(p.name, `shift-change @${agent}: DELIVERED — fresh session briefed`);
+        } catch (e) {
+          log(p.name, `shift-change @${agent} FAILED: ${e.message?.slice(0, 100)} — will retry`);
+          await sh(SP, ["shift-change", "--mark", id, "pending"], { cwd: p.proj }).catch(() => {});
+        } finally { SHIFT_BUSY.delete(key); }
+      })();
+    }
+  }
+}
+setInterval(shiftSweep, 20000);
+
 // ── main ─────────────────────────────────────────────────────
 log(`relay=${RELAY} roots=${ROOTS.join(",")} (websocket mode)`);
 findPads().forEach(track);
