@@ -473,7 +473,7 @@ function Sidebar({ drawer, setDrawer }) {
   const roster = (s.doc?.roster || []).map(m => m.name);
   return html`<div id="chans" class=${drawer ? "open" : ""}>
     <h1><span style="width:22px;height:22px;display:inline-flex"><${LOGO}/></span>pasture</h1>
-    <div class="sect">Stitchpads</div>
+    <div class="sect">Pastures</div>
     <div id="chanlist">
       ${s.pads.map(p => html`<div key=${p.name} class=${"chan" + (p.name === s.pad && !s.dmWith ? " on" : "")} onClick=${() => { setDrawer(false); if (p.name === s.pad) closeDM(); else switchPad(p.name); }}><span class="h">#</span>${p.name}</div>`)}
     </div>

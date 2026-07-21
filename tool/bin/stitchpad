@@ -1352,7 +1352,7 @@ except Exception:
     _snip="$(printf '%s\n' "$_latest" | grep -v '^## ' | grep -v '^[[:space:]]*$' | head -1 | sed 's/^[[:space:]]*//' | cut -c1-120)"
     # context discipline: point at the WINDOWED read, never the raw file — the
     # pad grows unbounded and "read the whole file" invites an 80K-token cat.
-    printf 'stitchpad: NEW from @%s — %s — reply with @%s (context: `stitchpad read --new` for unread only, `stitchpad read -n 40` for the recent window — do NOT cat stitchpad.md)\n' "$_sender" "$_snip" "$_sender"
+    printf 'pasture: NEW from @%s — %s — reply with @%s (context: `stitchpad read --new` for unread only, `stitchpad read -n 40` for the recent window — do NOT cat stitchpad.md)\n' "$_sender" "$_snip" "$_sender"
     # TASKS-IN-WAKE: append the woken agent's open tickets so status upkeep happens
     # at the exact moment they're already engaging with the pad — no human nagging.
     # Relay mode has no local pad tasks; skip there.

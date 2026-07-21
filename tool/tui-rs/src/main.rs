@@ -180,7 +180,7 @@ fn main() -> io::Result<()> {
     let pad_name = std::env::current_dir()
         .ok()
         .and_then(|d| d.file_name().map(|f| f.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "stitchpad".into());
+        .unwrap_or_else(|| "pasture".into());
 
     loop {
         // Drain pad-change events (collapse bursts into one refresh) — every
