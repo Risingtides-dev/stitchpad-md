@@ -14,6 +14,17 @@
 
 set -uo pipefail
 
+# ── PASTURE COMPAT (migration stage 1) ──────────────────────────────
+# PASTURE_* env wins; STITCHPAD_* stays accepted until stage 4 retires it.
+# Normalized ONCE here so every shell consumer keeps reading STITCHPAD_*.
+for _pv_name in NAME SESSION PAD_DIR STEAL HOME CWD RELAY TOKEN PAD HANDLE INVITE \
+                FORCE_BIND HEARTBEAT_INTERVAL HEARTBEAT_PARENT_PID HEARTBEAT_AUTOSTART \
+                ALLOW_WHOAMI_FALLBACK MODEL PADS SUMMARIZER; do
+  eval "_pv_val=\${PASTURE_${_pv_name}:-}"
+  [ -n "$_pv_val" ] && eval "export STITCHPAD_${_pv_name}=\"\$_pv_val\""
+done
+unset _pv_name _pv_val
+
 # STITCHPAD_HOME is the checkout's tool/ dir (holds bin/ + adapters/). If the
 # caller already resolved BIN_DIR (via the symlink-safe header), derive HOME from
 # it so install-by-symlink works without anyone exporting STITCHPAD_HOME.
@@ -29,7 +40,8 @@ sp_find_pad() {
   if [ -n "${PAD_DIR:-}" ]; then echo "$PAD_DIR"; return; fi
   local d="${1:-$PWD}"
   while [ "$d" != "/" ]; do
-    [ -d "$d/.stitchpad" ] && { echo "$d/.stitchpad"; return; }
+    [ -d "$d/.pasture" ] && { echo "$d/.pasture"; return; }     # migrated pad wins
+    [ -d "$d/.stitchpad" ] && { echo "$d/.stitchpad"; return; } # legacy accepted
     d="$(dirname "$d")"
   done
   return 1
@@ -60,9 +72,10 @@ sp_init_paths() {
   #   3. $PWD                         — the pad under the current directory
   # Without #2, a watcher/daemon launched from the wrong cwd silently watched the
   # wrong pad (ocean-os's watcher latched onto stitchpad-live). Honor the pin.
-  PAD_DIR="$(sp_find_pad "${1:-${STITCHPAD_PAD_DIR:-$PWD}}")" || { echo "no .stitchpad found (run: stitchpad init)" >&2; return 1; }
-  PAD_MD="$PAD_DIR/stitchpad.md"
-  PAD_GIT="$PAD_DIR/stitchpad-git"
+  PAD_DIR="$(sp_find_pad "${1:-${STITCHPAD_PAD_DIR:-$PWD}}")" || { echo "no pasture found (run: pasture init)" >&2; return 1; }
+  # migrated pads carry pasture.md/pasture-git; legacy names accepted until stage 4
+  if [ -f "$PAD_DIR/pasture.md" ]; then PAD_MD="$PAD_DIR/pasture.md"; else PAD_MD="$PAD_DIR/stitchpad.md"; fi
+  if [ -d "$PAD_DIR/pasture-git" ]; then PAD_GIT="$PAD_DIR/pasture-git"; else PAD_GIT="$PAD_DIR/stitchpad-git"; fi
   PAD_STATE="$PAD_DIR/.state"
   mkdir -p "$PAD_STATE/sessions"
   sp_ensure_outer_git_ignore
@@ -432,7 +445,9 @@ sp_engagement() {
 # to pad A cannot be claimed by pad B, addressed by pad B's wakes, or used to
 # post into pad B, unless the operator explicitly steals it (STITCHPAD_STEAL=1)
 # or the old claim goes stale (>300s without a heartbeat).
-SP_TERMDIR="$HOME/.stitchpad-terminals"
+# migrated machines use ~/.pasture-terminals (stage 2 moves the registry whole);
+# until then the legacy dir remains the single source of truth
+if [ -d "$HOME/.pasture-terminals" ]; then SP_TERMDIR="$HOME/.pasture-terminals"; else SP_TERMDIR="$HOME/.stitchpad-terminals"; fi
 sp_term_surface_of() { printf '%s' "$1"; }   # Herdr terminal ids and Ocean session ids are direct targets
 # The terminal id of THIS shell's Herdr pane. Herdr exports a pane id, so
 # resolve it to the stable terminal id used by roster targets and isolation locks.

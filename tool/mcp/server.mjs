@@ -64,9 +64,9 @@ const CLI = path.join(STITCHPAD_HOME, "bin", "stitchpad");
 // with either an invite (STITCHPAD_INVITE, redeemed once at startup) or a
 // pre-issued bearer token (STITCHPAD_TOKEN, used directly with STITCHPAD_PAD).
 // Otherwise we run in LOCAL MODE and shell out to the `stitchpad` CLI as before.
-const RELAY_URL = (process.env.STITCHPAD_RELAY || "").replace(/\/+$/, "");
-const RELAY_INVITE = process.env.STITCHPAD_INVITE || "";
-const RELAY_MODE = !!(RELAY_URL && (RELAY_INVITE || process.env.STITCHPAD_TOKEN));
+const RELAY_URL = (process.env.PASTURE_RELAY || process.env.STITCHPAD_RELAY || "").replace(/\/+$/, "");
+const RELAY_INVITE = process.env.PASTURE_INVITE || process.env.STITCHPAD_INVITE || "";
+const RELAY_MODE = !!(RELAY_URL && (RELAY_INVITE || process.env.PASTURE_TOKEN || process.env.STITCHPAD_TOKEN));
 
 if (RELAY_MODE) {
   try {
@@ -79,9 +79,9 @@ if (RELAY_MODE) {
 
 // Relay session, held in memory. Populated by redeemInvite() at startup (invite
 // path) or straight from env (direct-token path). All relay HTTP calls use these.
-let relayToken = process.env.STITCHPAD_TOKEN || "";
-let padName = process.env.STITCHPAD_PAD || "";
-let myHandle = process.env.STITCHPAD_HANDLE || "";
+let relayToken = process.env.PASTURE_TOKEN || process.env.STITCHPAD_TOKEN || "";
+let padName = process.env.PASTURE_PAD || process.env.STITCHPAD_PAD || "";
+let myHandle = process.env.PASTURE_HANDLE || process.env.STITCHPAD_HANDLE || "";
 
 function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
@@ -128,12 +128,12 @@ function padCwd() {
   const terminal = currentHerdrTerminalId();
   if (terminal) {
     try {
-      const raw = fsSync.readFileSync(path.join(process.env.HOME || "", ".stitchpad-terminals", terminal), "utf8");
+      const raw = fsSync.readFileSync([path.join(process.env.HOME || "", ".pasture-terminals", terminal), path.join(process.env.HOME || "", ".stitchpad-terminals", terminal)].find(f => fsSync.existsSync(f)) || path.join(process.env.HOME || "", ".stitchpad-terminals", terminal), "utf8");
       const [padDir, , ts] = raw.trim().split("|");
       if (padDir && Date.now() / 1000 - (+ts || 0) < 300) return path.dirname(padDir);
     } catch {}
   }
-  return process.env.STITCHPAD_CWD || process.cwd();
+  return process.env.PASTURE_CWD || process.env.STITCHPAD_CWD || process.cwd();
 }
 
 // `me` pins STITCHPAD_NAME for this call so the CLI derives the sender from

@@ -154,7 +154,7 @@ fn main() -> io::Result<()> {
         })
         .and_then(|mut w| {
             // watch the dir (editors/append may replace the inode); filter is cheap.
-            w.watch(Path::new(".stitchpad"), RecursiveMode::NonRecursive)?;
+            w.watch(Path::new(if std::path::Path::new(".pasture").exists() { ".pasture" } else { ".stitchpad" }), RecursiveMode::NonRecursive)?;
             Ok(w)
         })
         .ok()

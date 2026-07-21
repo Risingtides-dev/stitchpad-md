@@ -16,14 +16,24 @@ import { readFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import os from "node:os";
 
-const RELAY = process.env.STITCHPAD_RELAY || "https://stitchpad.agentsworld.org";
-const TOKEN = process.env.STITCHPAD_TOKEN;
-if (!TOKEN) { console.error("[bridge-ws] STITCHPAD_TOKEN required"); process.exit(1); }
+// PASTURE COMPAT (stage 1): PASTURE_* env wins, STITCHPAD_* accepted until stage 4
+const env = (k, d) => process.env["PASTURE_" + k] ?? process.env["STITCHPAD_" + k] ?? d;
+const RELAY = env("RELAY", "https://pasture.agentsworld.org");
+const TOKEN = env("TOKEN");
+if (!TOKEN) { console.error("[bridge-ws] PASTURE_TOKEN (or STITCHPAD_TOKEN) required"); process.exit(1); }
 const ROOTS = process.argv.slice(2).length ? process.argv.slice(2) : [os.homedir()];
-// optional allowlist: STITCHPAD_PADS="ocean-surface,ocean-os" → only these sync
-const ONLY = (process.env.STITCHPAD_PADS || "").split(",").map(s => s.trim()).filter(Boolean);
+// optional allowlist: PASTURE_PADS="ocean-surface,ocean-os" → only these sync
+const ONLY = (env("PADS", "")).split(",").map(s => s.trim()).filter(Boolean);
 const HOME = os.homedir();
-const SP = existsSync(join(HOME, ".stitchpad/bin/stitchpad")) ? join(HOME, ".stitchpad/bin/stitchpad") : "stitchpad";
+const SP = [join(HOME, ".pasture/bin/pasture"), join(HOME, ".stitchpad/bin/stitchpad")].find(existsSync) || "stitchpad";
+// migrated pads carry pasture.md; legacy stitchpad.md accepted until stage 4
+const padMd = (padd) => { const f = join(padd, "pasture.md"); return existsSync(f) ? f : join(padd, "stitchpad.md"); };
+const readTermLock = (t) => {
+  for (const d of [join(HOME, ".pasture-terminals"), join(HOME, ".stitchpad-terminals")]) {
+    try { return readFileSync(join(d, t), "utf8"); } catch { /* next */ }
+  }
+  return null;
+};
 const PUSH_ONCE = join(dirname(new URL(import.meta.url).pathname), "bridge-push-once.sh");
 const HERDR = existsSync(join(HOME, ".local/bin/herdr")) ? join(HOME, ".local/bin/herdr") : "herdr";
 const WSURL = RELAY.replace(/^http/, "ws");
@@ -43,11 +53,11 @@ function findPads() {
       "(", "-name", "Library", "-o", "-name", "node_modules", "-o", "-name", ".Trash",
       "-o", "-name", ".git", "-o", "-name", ".nvm", "-o", "-name", ".cache",
       "-o", "-name", "target", "-o", "-name", ".cargo", "-o", "-name", ".rustup", ")", "-prune",
-      "-o", "-type", "d", "-name", ".stitchpad", "-print"], { timeout: 60000 });
+      "-o", "-type", "d", "(", "-name", ".pasture", "-o", "-name", ".stitchpad", ")", "-print"], { timeout: 60000 });
     for (const p of String(res.stdout || "").split("\n")) {
-      if (!p || p.includes("/.stitchpad/.stitchpad")) continue;
+      if (!p || /\/\.(stitchpad|pasture)\/\.(stitchpad|pasture)/.test(p)) continue;
       if (ONLY.length && !ONLY.includes(basename(dirname(p)))) continue;
-      if (existsSync(join(p, "stitchpad.md"))) out.push(p);
+      if (existsSync(join(p, "stitchpad.md")) || existsSync(join(p, "pasture.md"))) out.push(p);
     }
   }
   return [...new Set(out)].sort();
@@ -90,7 +100,7 @@ async function resolvePane(p, name) {
   // a different pad or under a different name (~/.stitchpad-terminals registry).
   try {
     const surface = target.split("@@").pop();
-    const [lpad, lname, lts] = readFileSync(join(HOME, ".stitchpad-terminals", surface), "utf8").trim().split("|");
+    const [lpad, lname, lts] = (readTermLock(surface) || "").trim().split("|");
     if (Date.now() / 1000 - (+lts || 0) < 300 && (lpad !== p.padd || lname !== name)) {
       log(p.name, `CROSS-PAD BLOCKED: DM for @${name} — terminal ${surface} is live as @${lname} in ${lpad}`);
       return null;
@@ -322,7 +332,7 @@ function track(padd) {
   const p = { padd, proj, name: basename(proj), ws: null, watcher: null, pushT: null, tries: 0, closed: false };
   pads.set(padd, p);
   try {
-    p.watcher = watch(join(padd, "stitchpad.md"), () => pushPad(p, "fs"));
+    p.watcher = watch(padMd(padd), () => pushPad(p, "fs"));
   } catch { /* file may briefly not exist; sweep still covers it */ }
   connect(p);
   pushPad(p, "startup");
@@ -335,7 +345,7 @@ const CLAUDE = existsSync(join(HOME, ".local/bin/claude")) ? join(HOME, ".local/
 async function summarize(p, msg) {
   log(p.name, `summarize requested by @${msg.by || "?"}`);
   let padTxt = "";
-  try { padTxt = readFileSync(join(p.padd, "stitchpad.md"), "utf8"); } catch {}
+  try { padTxt = readFileSync(padMd(p.padd), "utf8"); } catch {}
   const tail = padTxt.split("\n").slice(-600).join("\n");
   const prompt = `Summarize this multi-agent coding thread for the human operator (@${msg.by || "smaths"}). ` +
     `Plain english, short bullets, under 180 words. Cover: (1) current state / what just happened, ` +
@@ -440,7 +450,7 @@ async function buildDoctor(p) {
     if (target && target !== "-" && adapter !== "ocean") {
       try {
         const surface = target.split("@@").pop();
-        const [lpad, lname, lts] = readFileSync(join(HOME, ".stitchpad-terminals", surface), "utf8").trim().split("|");
+        const [lpad, lname, lts] = (readTermLock(surface) || "").trim().split("|");
         const fresh = Date.now() / 1000 - (+lts || 0) < 300;
         a.lock = !fresh ? "stale" : (lpad === p.padd && lname === name) ? "ok"
           : lname === "operator" ? "OPERATOR TERMINAL" : `CONFLICT: @${lname} in ${lpad.split("/").slice(-2, -1)[0]}`;
@@ -501,13 +511,13 @@ async function keepAlive(p) {
   // dormant pads don't get revived tickers: a dead test pad's heartbeat could
   // claim a vacant terminal lock and block deliveries in a live pad. Using a
   // dormant pad again (any write) re-arms its keepalive automatically.
-  try { if (Date.now() - statSync(join(p.padd, "stitchpad.md")).mtimeMs > 7 * 86400e3) return; } catch { return; }
+  try { if (Date.now() - statSync(padMd(p.padd)).mtimeMs > 7 * 86400e3) return; } catch { return; }
   // ROSTER GUARD: direct-file writers (remote agents, raw edits) have dropped
   // the pad header before — a missing roster silently breaks gates, doctor,
   // and profiles while the running watcher coasts on its cached copy. Back the
   // block up whenever it parses; put it back the moment it vanishes.
   try {
-    const padTxt = readFileSync(join(p.padd, "stitchpad.md"), "utf8");
+    const padTxt = readFileSync(padMd(p.padd), "utf8");
     const rb = padTxt.match(/```roster\n[\s\S]*?```/);
     const bak = join(p.padd, ".state", "roster.backup");
     if (rb) writeFileSync(bak, rb[0]);
@@ -541,7 +551,7 @@ async function keepAlive(p) {
   // drowns agent context. Compact moves old transcript to archive.sqlite and
   // leaves a rolling summary; 6h guard so one oversize pad can't thrash.
   try {
-    const st = statSync(join(p.padd, "stitchpad.md"));
+    const st = statSync(padMd(p.padd));
     const guard = join(p.padd, ".state", "compact.last");
     let last = 0; try { last = statSync(guard).mtimeMs; } catch { /* never compacted */ }
     if (st.size > 700000 && Date.now() - last > 6 * 3600e3) {
@@ -608,9 +618,9 @@ async function healTargets() {
     panes = JSON.parse(stdout)?.result?.panes || [];
   } catch { return; }
   const liveTerms = new Set(panes.map(x => x.terminal_id).filter(Boolean));
-  const lockOf = t => { try { return readFileSync(join(HOME, ".stitchpad-terminals", t), "utf8").split("|"); } catch { return null; } };
+  const lockOf = t => { const r = readTermLock(t); return r ? r.split("|") : null; };
   for (const [, p] of pads) {
-    try { if (Date.now() - statSync(join(p.padd, "stitchpad.md")).mtimeMs > 7 * 86400e3) continue; } catch { continue; }
+    try { if (Date.now() - statSync(padMd(p.padd)).mtimeMs > 7 * 86400e3) continue; } catch { continue; }
     let roster;
     try { roster = (await sh(SP, ["roster"], { cwd: p.proj })).stdout; } catch { continue; }
     for (const line of roster.split("\n")) {

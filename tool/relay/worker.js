@@ -195,11 +195,11 @@ export default {
     if (url.pathname === "/login" && req.method === "POST") {
       const { user, pass } = await req.json().catch(() => ({}));
       let users = {};
-      try { users = JSON.parse(env.STITCHPAD_USERS || "{}"); } catch {}
+      try { users = JSON.parse((env.PASTURE_USERS || env.STITCHPAD_USERS) || "{}"); } catch {}
       const u = users[user];
-      if (u && u.pass === pass) return json({ token: env.STITCHPAD_TOKEN, handle: u.handle || user });
+      if (u && u.pass === pass) return json({ token: (env.PASTURE_TOKEN || env.STITCHPAD_TOKEN), handle: u.handle || user });
       // fallback: the original single operator login
-      if (user === env.STITCHPAD_USER && pass === env.STITCHPAD_PASS) return json({ token: env.STITCHPAD_TOKEN, handle: "smaths" });
+      if (user === (env.PASTURE_USER || env.STITCHPAD_USER) && pass === (env.PASTURE_PASS || env.STITCHPAD_PASS)) return json({ token: (env.PASTURE_TOKEN || env.STITCHPAD_TOKEN), handle: "smaths" });
       return json({ error: "bad credentials" }, 401);
     }
 
@@ -218,7 +218,7 @@ export default {
         return json({ error: "invite expired" }, 403);
       }
       // Valid → hand back the relay token scoped to this pad + the invited handle.
-      return json({ token: env.STITCHPAD_TOKEN, pad: inv.pad, handle: inv.handle });
+      return json({ token: (env.PASTURE_TOKEN || env.STITCHPAD_TOKEN), pad: inv.pad, handle: inv.handle });
     }
 
     // Non-API paths → serve the PWA static assets (index.html, manifest).
@@ -228,7 +228,7 @@ export default {
     }
     // WS can't set headers from the browser — accept the bearer as ?token= there.
     const tok = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || (url.searchParams.get("token") || "");
-    if (!env.STITCHPAD_TOKEN || tok !== env.STITCHPAD_TOKEN) return json({ error: "unauthorized" }, 401);
+    if (!(env.PASTURE_TOKEN || env.STITCHPAD_TOKEN) || tok !== (env.PASTURE_TOKEN || env.STITCHPAD_TOKEN)) return json({ error: "unauthorized" }, 401);
 
     const pad = (url.searchParams.get("pad") || "").trim();
 

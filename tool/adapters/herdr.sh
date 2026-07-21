@@ -40,7 +40,7 @@ fi
 # ONE TERMINAL = ONE PAD: never inject a wake into a terminal that is live in a
 # DIFFERENT pad or under a different name. ~/.stitchpad-terminals/<surface> is
 # the machine-global claim registry ("pad_dir|name|epoch", heartbeat-refreshed).
-lockf="$HOME/.stitchpad-terminals/${target##*@@}"
+lockf="$HOME/.pasture-terminals/${target##*@@}"; [ -f "$lockf" ] || lockf="$HOME/.stitchpad-terminals/${target##*@@}"
 if [ -f "$lockf" ]; then
   IFS='|' read -r _lpad _lname _lts < "$lockf"
   if [ $(( $(date +%s) - ${_lts:-0} )) -lt 300 ] \

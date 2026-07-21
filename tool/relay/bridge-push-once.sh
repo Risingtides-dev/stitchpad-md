@@ -12,9 +12,9 @@ SP="$(command -v stitchpad || echo "$HOME/.stitchpad/bin/stitchpad")"
 
 api() { curl -fsS -H "authorization: Bearer $TOKEN" -H "content-type: application/json" "$@"; }
 
-[ -f "$padd/stitchpad.md" ] || exit 0
+PADMD="$padd/pasture.md"; [ -f "$PADMD" ] || PADMD="$padd/stitchpad.md"; [ -f "$PADMD" ] || exit 0
 name="$(basename "$(dirname "$padd")")"            # pad name = project dir
-md="$(cat "$padd/stitchpad.md")"
+md="$(cat "$PADMD")"
 # Cloudflare WS frames cap at 1MiB — a pad past that kills the DO broadcast
 # (error 1101) and NOTHING updates. Phones only need the recent window; keep
 # the roster block + EVERY task block (the board renders from this doc — a
@@ -108,7 +108,7 @@ print(json.dumps(skills))
   if [ -f "$padd/.state/dnd.$_name" ]; then
     _status="dnd"
   else
-    _last_post_epoch="$(grep -a "^## @$_name" "$padd/stitchpad.md" | tail -1 | grep -o '[0-9]\{2\}:[0-9]\{2\}' | tail -1 | xargs -I{} date -j -f '%H:%M' '{}' +%s 2>/dev/null || echo 0)"
+    _last_post_epoch="$(grep -a "^## @$_name" "$PADMD" | tail -1 | grep -o '[0-9]\{2\}:[0-9]\{2\}' | tail -1 | xargs -I{} date -j -f '%H:%M' '{}' +%s 2>/dev/null || echo 0)"
     _now_hour="$(date +%H:%M)"
     _now_epoch="$(date -j -f '%H:%M' "$_now_hour" +%s 2>/dev/null || echo 0)"
     _post_age=$(( _now_epoch - _last_post_epoch ))
