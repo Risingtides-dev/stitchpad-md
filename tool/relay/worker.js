@@ -335,9 +335,13 @@ export default {
     }
 
     if (url.pathname === "/say" && req.method === "POST") {
-      const { from, text } = await req.json();
-      if (!text) return json({ error: "empty" }, 400);
+      // `re` threads the message (#m-… parent id); `react` is {id, emoji} —
+      // both ride the same queue and the bridge picks the CLI verb.
+      const { from, text, re, react } = await req.json();
+      if (!text && !react) return json({ error: "empty" }, 400);
       const msg = { from: from || "smaths", text, at: Date.now() };
+      if (re) msg.re = String(re);
+      if (react && react.id && react.emoji) msg.react = { id: String(react.id), emoji: String(react.emoji) };
       if (await tryDeliver(env, pad, "say", msg)) return json({ ok: true, delivered: "ws" });
       const qk = `outbox:${pad}`;
       const q = JSON.parse((await env.STITCHPAD.get(qk)) || "[]");

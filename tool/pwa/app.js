@@ -8,6 +8,8 @@
 //   transport  — websocket to the PadHub DO + polling fallback (unchanged logic)
 //   components — App / Login / Sidebar / Log / Composer / cards stay imperative
 import { html, render, useState, useEffect, useLayoutEffect, useRef } from "./vendor/preact-standalone.module.js";
+import { renderUi, extractUi } from "./ui/render.js";
+import { composeFence, validate as validateUi } from "./ui/schemas.mjs";
 
 // ── helpers (unchanged from the vanilla app) ─────────────────
 const RELAY = location.origin;
@@ -52,7 +54,11 @@ function fmt(t) {
 // fenced blocks: ```task TASK-N renders as a real card (title, status,
 // assignee, DESCRIPTION — the body after ---); everything else stays a
 // copyable code block. Content arrives pre-escaped.
-function fenceBlock(f) {
+function fenceBlock(f, ctx) {
+  // ```ui <type> → rich component (registry-validated; anything off-schema
+  // falls back to a copyable code block — never raw HTML)
+  const um = (f.info || "").match(/^ui\s+([a-z.-]+)/i);
+  if (um) return renderUi(um[1].toLowerCase(), f.code, ctx || {});
   const tm = (f.info || "").match(/^task\s+(\S+)/i);
   if (tm) {
     const meta = {}; const desc = []; let inDesc = false;
@@ -70,7 +76,7 @@ function fenceBlock(f) {
   }
   return `<div class="cb"><button class="cpy" title="copy">copy</button><pre>${f.code}</pre></div>`;
 }
-function fmtMd(t) {
+function fmtMd(t, ctx) {
   // Block-level markdown for LLM output (thread summaries): headings, lists,
   // quotes, hr, code fences, paragraphs. Inline styling mirrors fmt().
   t = esc(t || "");
@@ -90,7 +96,7 @@ function fmtMd(t) {
   for (const raw of t.split("\n")) {
     const l = raw.trim(); let m;
     if (!l) { endPara(); endList(); continue; }
-    if ((m = l.match(/^\u0000(\d+)\u0000$/))) { endPara(); endList(); out.push(fenceBlock(codes[+m[1]])); continue; }
+    if ((m = l.match(/^\u0000(\d+)\u0000$/))) { endPara(); endList(); out.push(fenceBlock(codes[+m[1]], ctx)); continue; }
     if ((m = l.match(/^(#{1,6})\s+(.*)$/))) { endPara(); endList(); out.push(`<div class="md-h md-h${Math.min(m[1].length, 3)}">${inline(m[2])}</div>`); continue; }
     if ((m = l.match(/^[-*•]\s+(.*)$/))) { endPara(); if (!list || list.t !== "ul") { endList(); list = { t: "ul", i: [] }; } list.i.push(inline(m[1])); continue; }
     if ((m = l.match(/^\d+[.)]\s+(.*)$/))) { endPara(); if (!list || list.t !== "ol") { endList(); list = { t: "ol", i: [] }; } list.i.push(inline(m[1])); continue; }
@@ -101,16 +107,30 @@ function fmtMd(t) {
   endPara(); endList();
   return out.join("");
 }
+// Header grammar v2: "## @name · TIME [· #m-ID] [· re:#m-PARENT]". The id is
+// the durable anchor for reactions + reply-threads; legacy id-less headers
+// still parse (no id → no reactions, keyed by content hash as before).
 function parse(md) {
   const out = []; let cur = null;
+  const rx = {}; // id → { emoji: [who…] } aggregated from reaction system lines
   for (const line of (md || "").split("\n")) {
-    let m = line.match(/^##\s+@(\S+)\s+·\s+(.+)$/);
-    if (m) { if (cur) out.push(cur); cur = { who: m[1], t: m[2], body: [] }; continue; }
+    let m = line.match(/^##\s+@(\S+)\s+·\s+([^·]+?)(?:\s+·\s+#(m-[a-z0-9]+))?(?:\s+·\s+re:#(m-[a-z0-9]+))?\s*$/);
+    if (m) { if (cur) out.push(cur); cur = { who: m[1], t: m[2].trim(), id: m[3] || null, re: m[4] || null, body: [] }; continue; }
+    // reaction lines aggregate into chips — never rendered as sys rows
+    let r = line.match(/^\*@(\S+)\s+reacted\s+(\S+)\s+to\s+#(m-[a-z0-9]+)\s+·.+\*$/);
+    if (r) {
+      if (cur) { out.push(cur); cur = null; }
+      const per = (rx[r[3]] = rx[r[3]] || {});
+      const who = (per[r[2]] = per[r[2]] || []);
+      if (!who.includes(r[1])) who.push(r[1]);
+      continue;
+    }
     let s = line.match(/^\*(.+?)·.+\*$/);
     if (s) { if (cur) { out.push(cur); cur = null; } out.push({ sys: s[1].trim() }); continue; }
     if (cur) cur.body.push(line);
   }
   if (cur) out.push(cur);
+  out.reactions = rx; // side-channel: acceptDoc merges into store.rxMap
   return out;
 }
 const normTxt = s => (s || "").replace(/\s+/g, " ").trim();
@@ -126,6 +146,9 @@ const store = {
   doctor: null, doctorOpen: false, boardOpen: false,
   dmView: "chat", terms: {},
   authed: false, loginErr: "",
+  rxMap: {},          // #m-id → {emoji: [who…]} — reaction chips
+  replyTo: null,      // {id, who} while composing a threaded reply
+  threads: {},        // #m-id → true when a thread is expanded
 };
 const subs = new Set();
 const publish = () => subs.forEach(f => f());
@@ -157,7 +180,11 @@ function keyBlocks(blocks) {
   const seen = {};
   for (let i = blocks.length - 1; i >= 0; i--) {
     const b = blocks[i];
-    const base = b.sys ? "s" + djb2(b.sys) : djb2(b.who + "|" + b.t + "|" + b.body.join("\n").trim());
+    // v2 messages carry a minted id — the strongest possible key. Legacy
+    // blocks fall back to the content hash.
+    const base = b.sys ? "s" + djb2(b.sys)
+      : b.id ? "i" + b.id
+      : djb2(b.who + "|" + b.t + "|" + b.body.join("\n").trim());
     const n = seen[base] = (seen[base] || 0) + 1;
     b.key = n > 1 ? base + "#" + n : base;
   }
@@ -174,6 +201,13 @@ function acceptDoc(d) {
   if (d.at) PAD_ETAG = `"${d.at}"`;
   setRelayColors(d.colors);
   const fresh = keyBlocks(parse(d.pad));
+  // Reactions: a WS push carries the WHOLE pad (roster fence present) → its
+  // reaction map is complete truth, replace. A tail poll only proves the ids
+  // it mentions (toggle-off deletes lines, so window ids replace wholesale;
+  // ids beyond the window keep what we knew).
+  store.rxMap = /```roster/.test(d.pad || "")
+    ? (fresh.reactions || {})
+    : { ...store.rxMap, ...(fresh.reactions || {}) };
   // MERGE, don't replace: subsequent polls only carry the last 200 lines, so a
   // naive swap drops rows off the TOP and shifts the log under a reader who is
   // scrolled up (the focus-yank complaint). The pad is append-only — keep every
@@ -373,7 +407,7 @@ const isOnline = n => { const p = profiles()[n] || {}; return p.online !== undef
 const liveState = n => { if (!isOnline(n)) return "offline"; const s = (profiles()[n] || {}).status; return s === "dnd" ? "dnd" : s === "working" ? "working" : "available"; };
 
 // send + DM + attach
-async function sendText(text) {
+async function sendText(text, re) {
   if (!text || !store.pad) return { ok: true };
   if (store.dmWith) {
     // TRUE DM → relay dmbox → bridge → herdr injection. Never lands on the pad.
@@ -395,7 +429,9 @@ async function sendText(text) {
   store.pending = [...store.pending, { text, at: Date.now() }];
   publish(); requestAnimationFrame(() => stick(true));
   try {
-    const r = await api("/say?pad=" + encodeURIComponent(store.pad), { method: "POST", body: JSON.stringify({ from: store.me, text }) });
+    const body = { from: store.me, text };
+    if (re) body.re = re;   // threaded reply → CLI say --re
+    const r = await api("/say?pad=" + encodeURIComponent(store.pad), { method: "POST", body: JSON.stringify(body) });
     if (!r.ok) throw new Error("HTTP " + r.status);
     setTimeout(poll, 400);
     return { ok: true };
@@ -526,21 +562,64 @@ function ClaimBar() {
 const cpyData = text => btoa(unescape(encodeURIComponent(text)));
 
 // message bodies render full markdown; walls of text clamp with "show more"
-function bubbleBd(text) {
+function bubbleBd(text, ctx) {
   const long = ((text.match(/\n/g) || []).length + 1) > 14 || text.length > 1400;
   return html`<div class=${"bdwrap" + (long ? " clamped" : "")}>
-    <div class="bd md" dangerouslySetInnerHTML=${{ __html: fmtMd(text) }}></div>
+    <div class="bd md" dangerouslySetInnerHTML=${{ __html: fmtMd(text, ctx) }}></div>
     ${long && html`<button class="bd-more">show more ▾</button>`}
   </div>`;
 }
 
-function Row({ b, grouped, enter }) {
+// quick-react set — the acks a working room actually uses
+const RX_SET = ["👍", "✅", "👀", "🔥", "❓", "🎉"];
+
+function toggleReact(id, emoji) {
+  if (!id) return;
+  // optimistic chip flip, then the pad echo confirms
+  const per = { ...(store.rxMap[id] || {}) };
+  const who = new Set(per[emoji] || []);
+  who.has(store.me) ? who.delete(store.me) : who.add(store.me);
+  who.size ? (per[emoji] = [...who]) : delete per[emoji];
+  store.rxMap = { ...store.rxMap, [id]: per };
+  publish();
+  api("/say?pad=" + encodeURIComponent(store.pad), {
+    method: "POST",
+    body: JSON.stringify({ from: store.me, react: { id, emoji } }),
+  }).then(() => setTimeout(poll, 400)).catch(() => notice("⚠ reaction failed", true));
+}
+
+function RxChips({ id }) {
+  const per = id && store.rxMap[id];
+  if (!per || !Object.keys(per).length) return null;
+  return html`<div class="rx-row">
+    ${Object.entries(per).map(([e, who]) => html`<button key=${e}
+      class=${"rx-chip" + (who.includes(store.me) ? " mine" : "")}
+      title=${who.map(w => "@" + w).join(" ")}
+      onClick=${() => toggleReact(id, e)}>${e}<i>${who.length}</i></button>`)}
+  </div>`;
+}
+
+function RowActs({ b }) {
+  const [pick, setPick] = useState(false);
+  if (!b.id) return null;
+  return html`<div class="row-acts">
+    ${pick && html`<div class="rx-pick" onMouseLeave=${() => setPick(false)}>
+      ${RX_SET.map(e => html`<button key=${e} onClick=${() => { toggleReact(b.id, e); setPick(false); }}>${e}</button>`)}
+    </div>`}
+    <button class="row-act" title="react" onClick=${() => setPick(p => !p)}>☺</button>
+    <button class="row-act" title="reply in thread" onClick=${() => { store.replyTo = { id: b.id, who: b.who }; publish(); document.getElementById("text")?.focus(); }}>↩</button>
+  </div>`;
+}
+
+function Row({ b, grouped, enter, ctx }) {
   const body = b.body.join("\n").trim();
-  const bd = bubbleBd(body);
+  const bd = bubbleBd(body, ctx);
   const cpy = html`<button class="row-cpy" title="copy message" data-copy=${cpyData(body)}>copy</button>`;
-  if (grouped) return html`<div class=${"row cmpct" + (enter ? " enter" : "")}>${cpy}<div class="gutter">${(b.t || "").replace(/\s*[AP]M$/i, "")}</div><div class="bubble">${bd}</div></div>`;
-  return html`<div class=${"row" + (enter ? " enter" : "")}>${cpy}<${Av} n=${b.who}/><div class="bubble">
-    <div class="hd"><span class="who card-trigger" data-agent=${b.who} style=${{ color: nameColor(b.who) }}>${b.who}</span><span class="ts">${b.t}</span></div>${bd}
+  const acts = html`<${RowActs} b=${b}/>`;
+  const chips = html`<${RxChips} id=${b.id}/>`;
+  if (grouped) return html`<div class=${"row cmpct" + (enter ? " enter" : "")}>${cpy}${acts}<div class="gutter">${(b.t || "").replace(/\s*[AP]M$/i, "")}</div><div class="bubble">${bd}${chips}</div></div>`;
+  return html`<div class=${"row" + (enter ? " enter" : "")}>${cpy}${acts}<${Av} n=${b.who}/><div class="bubble">
+    <div class="hd"><span class="who card-trigger" data-agent=${b.who} style=${{ color: nameColor(b.who) }}>${b.who}</span><span class="ts">${b.t}</span></div>${bd}${chips}
   </div></div>`;
 }
 
@@ -577,6 +656,29 @@ function Skeleton() {
   return html`<div>${[70, 45, 85, 60, 75].map((p, i) => html`<div key=${i} class="skel"><div class="a"></div><div class="l"><div class="b" style=${{ width: p * .4 + "%" }}></div><div class="b" style=${{ width: p + "%" }}></div></div></div>`)}</div>`;
 }
 
+// A top-level message plus its folded thread. The parent's ctx carries its
+// replies' parsed ui payloads so interactive components tally live.
+function ThreadedRow({ it, enter }) {
+  const s = useStore();
+  const b = it.b;
+  const replies = it.replies || [];
+  const ctx = {
+    id: b.id, who: b.who, me: s.me,
+    replies: replies.map(r => ({ who: r.who, ui: extractUi(r.body.join("\n")) })),
+  };
+  const open = !!(b.id && (s.threads[b.id] || (s.replyTo && s.replyTo.id === b.id)));
+  return html`<div class="trw">
+    <${Row} b=${b} grouped=${it.grouped} enter=${enter} ctx=${ctx}/>
+    ${replies.length > 0 && html`<button class="th-toggle" onClick=${() => { store.threads = { ...store.threads, [b.id]: !open }; publish(); }}>
+      <span class="th-arr">${open ? "▾" : "▸"}</span> ${replies.length} ${replies.length === 1 ? "reply" : "replies"}
+    </button>`}
+    ${open && replies.length > 0 && html`<div class="thread">
+      ${replies.map(r => html`<${Row} key=${r.key} b=${r} grouped=${false} enter=${false}
+        ctx=${{ id: r.id, who: r.who, me: s.me, replies: [] }}/>`)}
+    </div>`}
+  </div>`;
+}
+
 function Log() {
   const s = useStore();
   const known = useRef(new Set());
@@ -602,11 +704,24 @@ function Log() {
     }
   } else if (s.blocks) {
     const msgs = s.blocks;
-    items = msgs.map((b, i) => {
+    // Threads: a block whose re:#parent resolves to a retained block folds
+    // under it; a reply whose parent scrolled out of retention flows flat.
+    const byId = new Map(msgs.filter(b => b.id).map(b => [b.id, b]));
+    const kids = new Map();
+    for (const b of msgs) {
+      if (!b.sys && b.re && byId.has(b.re)) {
+        if (!kids.has(b.re)) kids.set(b.re, []);
+        kids.get(b.re).push(b);
+      }
+    }
+    const inThread = new Set();
+    for (const arr of kids.values()) for (const b of arr) inThread.add(b.key);
+    const top = msgs.filter(b => !inThread.has(b.key));
+    items = top.map((b, i) => {
       if (b.sys) return { key: b.key, sys: b.sys };
-      const prev = msgs[i - 1];
+      const prev = top[i - 1];
       const grouped = !!(prev && !prev.sys && prev.who === b.who);
-      return { key: b.key + (grouped ? "g" : ""), b, grouped };
+      return { key: b.key + (grouped ? "g" : ""), b, grouped, replies: kids.get(b.id) || [] };
     });
   }
   // entrance animation only for keys that appear after first paint
@@ -646,7 +761,7 @@ function Log() {
         it.sys ? html`<div key=${it.key} class=${"sys" + (fresh.has(it.key) ? " enter" : "")}>${it.sys}</div>`
         : it.sess ? html`<${SessRow} key=${it.key} m=${it.sess} agent=${s.dmWith}/>`
         : it.dm ? html`<${DmRow} key=${it.key} dm=${it.dm}/>`
-        : html`<${Row} key=${it.key} b=${it.b} grouped=${it.grouped} enter=${fresh.has(it.key)}/>`)}
+        : html`<${ThreadedRow} key=${it.key} it=${it} enter=${fresh.has(it.key)}/>`)}
     </div>
     <div id="pend">
       ${s.pending.map(p => html`<div key=${p.at + p.text.slice(0, 20)} class="row pending"><${Av} n=${s.me} trigger=${false}/><div class="bubble">
@@ -698,7 +813,7 @@ function Composer() {
     if (!t) { setAc(null); return; }
     const q = t.q.toLowerCase();
     const items = t.kind === "@"
-      ? ["all", ...roster.filter(n => n !== s.me)].filter(n => n.toLowerCase().startsWith(q)).slice(0, 12)
+      ? ["all", "flock", ...roster.filter(n => n !== s.me)].filter(n => n.toLowerCase().startsWith(q)).slice(0, 12)
       : t.kind === "/"
       ? SLASH.filter(c => c[0].startsWith(q)).slice(0, 12)
       : filesList.filter(f => f.toLowerCase().includes(q)).slice(0, 12);
@@ -715,8 +830,10 @@ function Composer() {
   };
   const doSend = async () => {
     const text = val.trim(); if (!text) return;
+    const re = s.replyTo?.id;
     setVal(""); setAc(null);
-    const res = await sendText(text);
+    if (re) { store.replyTo = null; publish(); }
+    const res = await sendText(text, re);
     if (!res.ok) setVal(res.text);   // restore so the send isn't lost
   };
   const onKey = e => {
@@ -740,12 +857,12 @@ function Composer() {
       <div class="ac-list">
         ${ac.items.map((it, i) => ac.kind === "@"
           ? html`<div key=${it} class=${"ac-item" + (i === ac.sel ? " sel" : "")} onMouseDown=${e => { e.preventDefault(); applyAc({ ...ac, sel: i }); }}>
-              ${it === "all"
+              ${it === "all" || it === "flock"
                 ? html`<span class="aav" style="background:var(--teal-soft);color:var(--teal)">@</span>`
                 : html`<${Av} n=${it} cls="aav" trigger=${false}/>`}
               <span class="anm">@${it}</span>
-              ${it !== "all" && html`<span class="adot" style=${{ background: liveState(it) === "working" ? "#2ea043" : liveState(it) === "dnd" ? "#d29922" : liveState(it) === "offline" ? "#4b5563" : "#3fb950" }}></span>`}
-              <span class="sub">${it === "all" ? "everyone" : ((s.doc?.roster || []).find(m => m.name === it) || {}).adapter || ""}</span>
+              ${it !== "all" && it !== "flock" && html`<span class="adot" style=${{ background: liveState(it) === "working" ? "#2ea043" : liveState(it) === "dnd" ? "#d29922" : liveState(it) === "offline" ? "#4b5563" : "#3fb950" }}></span>`}
+              <span class="sub">${it === "all" ? "everyone" : it === "flock" ? "gang-prompt the whole flock" : ((s.doc?.roster || []).find(m => m.name === it) || {}).adapter || ""}</span>
             </div>`
           : ac.kind === "/"
           ? html`<div key=${it[0]} class=${"ac-item" + (i === ac.sel ? " sel" : "")} onMouseDown=${e => { e.preventDefault(); applyAc({ ...ac, sel: i }); }}><span class="fico">/</span><span class="anm">/${it[0]}</span><span class="sub">${it[1]}</span></div>`
@@ -753,6 +870,8 @@ function Composer() {
       </div>
       <div class="ac-hint"><span><b>↑↓</b> navigate</span><span><b>tab</b> select</span><span><b>esc</b> dismiss</span></div>
     </div>`}
+    ${s.replyTo && html`<div id="replybar">↩ replying to <b style=${{ color: nameColor(s.replyTo.who) }}>@${s.replyTo.who}</b>
+      <button aria-label="cancel reply" onClick=${() => { store.replyTo = null; publish(); }}>✕</button></div>`}
     <div id="composer">
       <button id="atbtn" aria-label="mention an agent" title="mention" onClick=${atClick}>@</button>
       <button id="attbtn" aria-label="attach a file" title="attach → .stitchpad/dropbox" onClick=${() => fpick.current.click()}>
@@ -868,8 +987,40 @@ if (window.visualViewport) {
   vv.addEventListener("scroll", () => { clearTimeout(vvT); vvT = setTimeout(applyVV, 16); });
 }
 
+// ── ui component actions: vote / verdict / form submit ───────
+// A component interaction is just a STRUCTURED THREADED REPLY — composed
+// client-side with the same schemas the MCP validates, sent down the normal
+// /say path with re:<origin>. Zero new server state.
+async function postUiReply(type, payload, alt, re) {
+  const problems = validateUi(type, payload);
+  if (problems.length) { notice("⚠ " + problems[0], true); return; }
+  await sendText(composeFence(type, payload, alt), re);
+}
+function handleUiAct(el) {
+  const act = el.dataset.uiAct, id = el.dataset.uiId;
+  if (!id) return;
+  if (act === "vote") {
+    const opt = el.dataset.uiOpt;
+    postUiReply("poll.vote", { choice: [opt] }, "voted: " + opt, id);
+  } else if (act === "verdict") {
+    const v = el.dataset.uiV;
+    postUiReply("approve.verdict", { verdict: v }, v === "approve" ? "✓ approved" : "✕ rejected", id);
+  } else if (act === "form-submit") {
+    const box = el.closest("[data-ui-form]");
+    if (!box) return;
+    const values = {};
+    for (const f of box.querySelectorAll("[data-ui-key]")) {
+      const k = f.dataset.uiKey;
+      values[k] = f.type === "checkbox" ? f.checked : f.value;
+    }
+    postUiReply("form.response", { values }, "submitted form", id);
+  }
+}
+
 // delegated: copy buttons (rows + code blocks) — operate on rendered DOM
 document.addEventListener("click", e => {
+  const ub = e.target.closest("[data-ui-act]");
+  if (ub) { handleUiAct(ub); return; }
   const rb = e.target.closest(".row-cpy");
   if (rb) {
     const text = decodeURIComponent(escape(atob(rb.dataset.copy || "")));
