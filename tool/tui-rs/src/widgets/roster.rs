@@ -1,3 +1,4 @@
+use crate::theme;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -26,10 +27,11 @@ impl LiveStatus {
     }
 
     fn color(&self) -> Color {
+        let t = theme::t();
         match self {
-            LiveStatus::Online => Color::Green,
-            LiveStatus::Offline => Color::DarkGray,
-            LiveStatus::Dnd => Color::Yellow,
+            LiveStatus::Online => t.ok,
+            LiveStatus::Offline => t.faint,
+            LiveStatus::Dnd => t.warn,
         }
     }
 }
@@ -56,12 +58,13 @@ impl Health {
     }
 
     fn color(&self) -> Color {
+        let t = theme::t();
         match self {
-            Health::Healthy => Color::Green,
-            Health::Untargeted => Color::Yellow,
-            Health::StaleTarget => Color::Red,
-            Health::MissingIdentity => Color::Yellow,
-            Health::Unknown => Color::Gray,
+            Health::Healthy => t.ok,
+            Health::Untargeted => t.warn,
+            Health::StaleTarget => t.err,
+            Health::MissingIdentity => t.warn,
+            Health::Unknown => t.muted,
         }
     }
 }
@@ -116,7 +119,7 @@ impl RosterRail {
     /// Is the pad watcher daemon running? (lock dir + live pid — same check the
     /// CLI uses). Probed in the background refresh thread, shown in the header.
     pub fn watcher_alive() -> bool {
-        let pid = match fs::read_to_string(".stitchpad/.state/watch.lock.d/pid") {
+        let pid = match fs::read_to_string(format!("{}/watch.lock.d/pid", crate::pad_state())) {
             Ok(s) => s.trim().to_string(),
             Err(_) => return false,
         };
@@ -231,7 +234,7 @@ impl RosterRail {
             // (same signal the bridge/PWA use — alive.<name> fresh <90s AND pid alive),
             // NOT doctor health. A crashed agent with a healthy wake target is offline.
             let live_status =
-                if std::path::Path::new(&format!(".stitchpad/.state/dnd.{}", name)).exists() {
+                if std::path::Path::new(&format!("{}/dnd.{}", crate::pad_state(), name)).exists() {
                     LiveStatus::Dnd
                 } else if Self::is_online(&name) {
                     LiveStatus::Online
@@ -298,7 +301,7 @@ impl RosterRail {
     /// Real liveness: heartbeat file fresh (<90s) AND pid still alive.
     /// Mirrors bridge.sh — alive.<name> is `{"pid":N,...}`, mtime is the freshness clock.
     fn is_online(name: &str) -> bool {
-        let path = format!(".stitchpad/.state/alive.{}", name);
+        let path = format!("{}/alive.{}", crate::pad_state(), name);
         let meta = match fs::metadata(&path) {
             Ok(m) => m,
             Err(_) => return false,
@@ -331,7 +334,7 @@ impl RosterRail {
     }
 
     fn state_value(prefix: &str, name: &str) -> Option<String> {
-        let path = format!(".stitchpad/.state/{}.{}", prefix, name);
+        let path = format!("{}/{}.{}", crate::pad_state(), prefix, name);
         fs::read_to_string(path)
             .ok()
             .map(|s| s.trim().to_string())
@@ -341,18 +344,22 @@ impl RosterRail {
 
 impl Widget for &RosterRail {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        let t = theme::t();
         let block = Block::default()
-            .title(" Agents ")
+            .title(Line::from(Span::styled(
+                " flock ",
+                Style::default().fg(t.muted),
+            )))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(90, 90, 90)));
+            .border_style(Style::default().fg(t.faint));
 
         let inner = block.inner(area);
         block.render(area, buf);
 
         if self.members.is_empty() {
             let empty = Line::from(Span::styled(
-                "  no agents joined",
-                Style::default().fg(Color::Gray),
+                "  the flock is out",
+                Style::default().fg(t.muted),
             ));
             buf.set_line(inner.x, inner.y, &empty, inner.width);
             return;
@@ -386,8 +393,7 @@ impl Widget for &RosterRail {
             buf.set_line(inner.x, y, &Line::from(row), inner.width);
 
             if !compact && y + 1 < inner.y + inner.height {
-                // Mid-grey stays legible on both light and dark backgrounds.
-                let value = Style::default().fg(Color::Rgb(128, 128, 128));
+                let value = Style::default().fg(t.faint);
                 let mut meta = format!("   {}", member.harness);
                 if member.model != "—" && !member.model.is_empty() {
                     meta.push_str(&format!(" · {}", member.model));
@@ -397,6 +403,20 @@ impl Widget for &RosterRail {
                 }
                 let meta_line = Line::from(Span::styled(meta, value));
                 buf.set_line(inner.x, y + 1, &meta_line, inner.width);
+            }
+        }
+
+        // A little grazing scene at the rail's foot — only when there's spare
+        // room (never crowds a full flock; pure lore, zero information cost).
+        let used = (self.members.len() as u16).saturating_mul(if compact { 1 } else { 2 });
+        let sheep_h = 10u16; // sheep + grass + a breath
+        if inner.height > used + sheep_h {
+            let pad = (inner.width.saturating_sub(22) / 2) as usize;
+            let art = crate::logo::sheep(pad);
+            let mut y = inner.y + inner.height - art.len() as u16;
+            for line in &art {
+                buf.set_line(inner.x, y, line, inner.width);
+                y += 1;
             }
         }
     }

@@ -16,6 +16,7 @@
 #   stitchpad rename <old> <new>          rename a member everywhere local state knows them
 #   stitchpad reset [name]                repair a wedged seat (or whole pad): zombie tickers, stale locks, wake cursors
 #   stitchpad compact [--keep N]          archive old transcript to sqlite, replace with rolling summary block
+#   stitchpad summarize [-n N]            LLM summary of the recent thread (read-only, nothing archived)
 #   stitchpad search <query> [-n N]       full-history search: live pad + compaction archive
 #   stitchpad shift-change --save <n> --file <f>   agent hands itself off to a fresh session (bridge clears + rebriefs)
 #   stitchpad who                         alias for roster
@@ -503,6 +504,26 @@ PY
     sp_unlock
     rm -f "$span_file" "$carried"
     echo "✓ compact gen $gen: $arch_count messages → archive.sqlite, kept $keep + open tasks + rolling summary"
+    ;;
+
+  summarize)
+    # LLM thread summary, READ-ONLY — sibling of compact's summarizer but the
+    # pad is untouched: no archive, no cursor resets, no commit. The TUI's
+    # /summarize (and any agent that wants a quick catch-up) calls this.
+    #   stitchpad summarize [-n N]   (default: newest 200 messages)
+    sp_init_paths || exit 1
+    n=200
+    while [ $# -gt 0 ]; do case "$1" in
+      -n) n="${2:-200}"; shift 2 ;;
+      *) shift ;;
+    esac; done
+    command -v claude >/dev/null 2>&1 || { echo "stitchpad: summarize needs the claude CLI on PATH" >&2; exit 1; }
+    _thread="$("$BIN_DIR/stitchpad" read -n "$n" 2>/dev/null)"
+    [ -n "$_thread" ] || { echo "stitchpad: nothing to summarize" >&2; exit 1; }
+    _sum="$(printf '%s\n' "$_thread" \
+      | claude -p "Summarize this multi-agent coding pad thread for someone catching up, under 200 words: decisions made, work completed per agent, current state, open threads/questions. Plain prose or tight bullets, no preamble. Respond with ONLY the summary." --model haiku 2>/dev/null | head -c 8000)"
+    [ -n "$_sum" ] || { echo "stitchpad: LLM summary came back empty" >&2; exit 1; }
+    printf '%s\n' "$_sum"
     ;;
 
   shift-change)

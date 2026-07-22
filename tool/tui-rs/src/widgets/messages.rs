@@ -1,9 +1,10 @@
+use crate::theme;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Widget},
+    widgets::{Block, Borders, Paragraph, Widget},
 };
 use std::process::Command;
 
@@ -167,7 +168,8 @@ impl MessageList {
     /// dir or unreadable files just yield no receipts (graceful: no "seen by" shown).
     fn seen_cursors() -> std::collections::HashMap<String, usize> {
         let mut map = std::collections::HashMap::new();
-        let dir = std::path::Path::new(".stitchpad/.state");
+        let dir = crate::pad_state();
+        let dir = std::path::Path::new(&dir);
         if let Ok(entries) = std::fs::read_dir(dir) {
             for e in entries.flatten() {
                 let fname = e.file_name();
@@ -226,7 +228,7 @@ impl MessageList {
             if !m.time.is_empty() {
                 header.push(Span::styled(
                     format!("  ·  {}", m.time),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme::t().faint),
                 ));
             }
             lines.push(Line::from(header));
@@ -252,7 +254,7 @@ impl MessageList {
                         Span::styled(
                             format!("[image: {}]", path),
                             Style::default()
-                                .fg(Color::DarkGray)
+                                .fg(theme::t().faint)
                                 .add_modifier(Modifier::ITALIC),
                         ),
                     ]));
@@ -281,7 +283,7 @@ impl MessageList {
                     Span::styled(
                         format!("seen by {}", who),
                         Style::default()
-                            .fg(Color::DarkGray)
+                            .fg(theme::t().faint)
                             .add_modifier(Modifier::ITALIC),
                     ),
                 ]));
@@ -294,16 +296,25 @@ impl MessageList {
 
 impl Widget for &MessageList {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let block = Block::default().title(" Messages ").borders(Borders::ALL);
+        let t = theme::t();
+        let block = Block::default()
+            .title(Line::from(Span::styled(
+                " pasture ",
+                Style::default().fg(t.muted),
+            )))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t.faint));
         let inner = block.inner(area);
         block.render(area, buf);
 
         if self.messages.is_empty() {
-            let empty = Line::from(Span::styled(
-                "  (no messages yet)",
-                Style::default().fg(Color::Gray),
-            ));
-            buf.set_line(inner.x, inner.y, &empty, inner.width);
+            let pad = (inner.width.saturating_sub(24) / 2) as usize;
+            let lines = crate::logo::empty_state(
+                "the pasture is quiet",
+                "type below to call the flock — @name wakes them",
+                pad,
+            );
+            Paragraph::new(lines).render(inner, buf);
             return;
         }
 

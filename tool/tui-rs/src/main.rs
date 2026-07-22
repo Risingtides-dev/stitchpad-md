@@ -1,4 +1,6 @@
 mod color;
+mod logo;
+mod theme;
 mod widgets;
 
 use crossterm::{
@@ -10,8 +12,8 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::layout::Rect;
 use notify::{RecursiveMode, Watcher};
+use ratatui::layout::Rect;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -19,24 +21,59 @@ use ratatui::{
 };
 use std::io;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
 use widgets::roster::{RosterMember, RosterRail};
 
-/// Chat-first stitchpad TUI.
+// ── Pad discovery (mirrors lib.sh sp_find_pad): nearest .pasture (migrated,
+// wins) or .stitchpad (legacy) up the tree; pasture.md else stitchpad.md. ──
+pub fn pad_dir() -> PathBuf {
+    let mut d = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    loop {
+        let p = d.join(".pasture");
+        if p.is_dir() {
+            return p;
+        }
+        let s = d.join(".stitchpad");
+        if s.is_dir() {
+            return s;
+        }
+        if !d.pop() {
+            return PathBuf::from(".stitchpad");
+        }
+    }
+}
+pub fn pad_file() -> PathBuf {
+    let d = pad_dir();
+    let p = d.join("pasture.md");
+    if p.is_file() { p } else { d.join("stitchpad.md") }
+}
+pub fn pad_state() -> String {
+    pad_dir().join(".state").to_string_lossy().into_owned()
+}
+
+/// Chat-first pasture TUI.
 ///
-/// The prompt is ALWAYS live on the Chat tab — type and hit Enter, no compose
-/// mode. That means plain letters belong to the input, so app actions live on
-/// modifiers (^C quit, ^T tasks, ^R refresh, ^Y copy) — the irssi/weechat
-/// convention. The Tasks tab has no input, so it keeps plain vim keys.
+/// The prompt is ALWAYS live on the pasture tab — type and hit Enter, no
+/// compose mode. That means plain letters belong to the input, so app actions
+/// live on modifiers (^C quit, ^T tasks, ^R refresh, ^Y copy) — the
+/// irssi/weechat convention — plus /slash commands (`/help` lists them).
+/// The barn (tasks) has no input, so it keeps plain vim keys.
 struct App {
-    tab: u8, // 0=Chat 1=Tasks
+    tab: u8, // 0=pasture 1=barn
     input: String,
     /// Cursor position in the input, as a CHAR index (0..=input char len).
     cursor: usize,
     detail_open: bool,
+    help_open: bool,
+    /// A finished /summarize renders here as a scrollable modal until Esc.
+    summary: Option<String>,
+    summary_scroll: u16,
+    /// Label of the in-flight background job (spinner in the footer). One at a time.
+    busy: Option<String>,
+    started: std::time::Instant,
     watcher_alive: bool,
     flash: Option<(String, std::time::Instant)>,
     /// Inner rect of the messages panel from the last draw — mouse events route
@@ -48,15 +85,39 @@ struct App {
     drag_anchor: Option<u16>,
 }
 
+const TAB_LABELS: [&str; 2] = ["pasture", "barn"];
+
+/// Slash commands the prompt understands. (name, args, blurb) — Tab completes
+/// them, /help prints them.
+const SLASH: [(&str, &str, &str); 6] = [
+    ("/summarize", "[n]", "chew the last n messages into a summary"),
+    ("/compact", "[keep]", "shear the pad — archive old wool to sqlite"),
+    ("/theme", "[name|auto]", "pin a theme, or follow herdr"),
+    ("/help", "", "the field guide"),
+    ("/ruminate", "[n]", "alias of /summarize"),
+    ("/shear", "[keep]", "alias of /compact"),
+];
+
+/// Background job results (compact/summarize run off-thread — the draw loop
+/// never waits on a fork, let alone a haiku call).
+enum Job {
+    Compact(Result<String, String>),
+    Summary(Result<String, String>),
+}
+
 impl App {
     fn flash(&mut self, msg: impl Into<String>) {
         self.flash = Some((msg.into(), std::time::Instant::now()));
     }
     fn flash_line(&self) -> Option<&str> {
         match &self.flash {
-            Some((m, t)) if t.elapsed() < Duration::from_secs(3) => Some(m.as_str()),
+            Some((m, t)) if t.elapsed() < Duration::from_secs(4) => Some(m.as_str()),
             _ => None,
         }
+    }
+    fn spinner(&self) -> char {
+        const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        FRAMES[(self.started.elapsed().as_millis() / 120) as usize % FRAMES.len()]
     }
 
     // ── Cursor-aware input editing (char-indexed; input may hold any UTF-8) ──
@@ -102,9 +163,82 @@ impl App {
         self.input.clear();
         self.cursor = 0;
     }
+
+    /// Run a /command typed into the prompt. Long work goes to a thread; the
+    /// result lands back through `jobs`.
+    fn handle_slash(&mut self, raw: &str, jobs: &mpsc::Sender<Job>) {
+        let body = raw.trim().trim_start_matches('/');
+        let mut parts = body.split_whitespace();
+        let cmd = parts.next().unwrap_or("");
+        let arg = parts.next().map(|s| s.to_string());
+        match cmd {
+            "help" => self.help_open = true,
+            "theme" => match arg {
+                Some(name) => match theme::set_override(&name) {
+                    Ok(l) => self.flash(format!("theme → {}", l)),
+                    Err(e) => self.flash(e),
+                },
+                None => self.flash(format!(
+                    "theme: {} — /theme <name> pins, /theme auto follows herdr",
+                    theme::load()
+                )),
+            },
+            "compact" | "shear" => {
+                if self.busy.is_some() {
+                    self.flash("already working — one job at a time");
+                    return;
+                }
+                let mut args = vec!["compact".to_string()];
+                if let Some(n) = arg.as_deref().and_then(|a| a.parse::<u32>().ok()) {
+                    args.push("--keep".into());
+                    args.push(n.to_string());
+                }
+                self.busy = Some("shearing the pad".into());
+                spawn_job(jobs.clone(), args, Job::Compact);
+            }
+            "summarize" | "ruminate" => {
+                if self.busy.is_some() {
+                    self.flash("already working — one job at a time");
+                    return;
+                }
+                let n = arg
+                    .as_deref()
+                    .and_then(|a| a.parse::<u32>().ok())
+                    .unwrap_or(200);
+                let args = vec!["summarize".to_string(), "-n".into(), n.to_string()];
+                self.busy = Some("ruminating".into());
+                spawn_job(jobs.clone(), args, Job::Summary);
+            }
+            other => self.flash(format!("unknown command /{} — /help lists them", other)),
+        }
+    }
+}
+
+/// Run `stitchpad <args>` on a worker thread, wrap the outcome with `wrap`,
+/// send it home. stdout on success; stderr (or stdout) trimmed on failure.
+fn spawn_job(
+    tx: mpsc::Sender<Job>,
+    args: Vec<String>,
+    wrap: fn(Result<String, String>) -> Job,
+) {
+    std::thread::spawn(move || {
+        let out = std::process::Command::new("stitchpad").args(&args).output();
+        let res = match out {
+            Ok(o) if o.status.success() => {
+                Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            }
+            Ok(o) => {
+                let err = if o.stderr.is_empty() { &o.stdout } else { &o.stderr };
+                Err(String::from_utf8_lossy(err).trim().to_string())
+            }
+            Err(e) => Err(e.to_string()),
+        };
+        let _ = tx.send(wrap(res));
+    });
 }
 
 fn main() -> io::Result<()> {
+    let _ = theme::load(); // resolve herdr theme before the first frame
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(
@@ -136,6 +270,11 @@ fn main() -> io::Result<()> {
         input: String::new(),
         cursor: 0,
         detail_open: false,
+        help_open: false,
+        summary: None,
+        summary_scroll: 0,
+        busy: None,
+        started: std::time::Instant::now(),
         watcher_alive: RosterRail::watcher_alive(),
         flash: None,
         msg_inner: Rect::default(),
@@ -143,7 +282,7 @@ fn main() -> io::Result<()> {
         drag_anchor: None,
     };
 
-    // Live-tail: watch .stitchpad/ and re-read pad-derived views on change.
+    // Live-tail: watch the pad dir and re-read pad-derived views on change.
     let (watch_tx, watch_rx) = mpsc::channel::<()>();
     let _watcher = {
         let tx = watch_tx.clone();
@@ -154,7 +293,7 @@ fn main() -> io::Result<()> {
         })
         .and_then(|mut w| {
             // watch the dir (editors/append may replace the inode); filter is cheap.
-            w.watch(Path::new(if std::path::Path::new(".pasture").exists() { ".pasture" } else { ".stitchpad" }), RecursiveMode::NonRecursive)?;
+            w.watch(&pad_dir(), RecursiveMode::NonRecursive)?;
             Ok(w)
         })
         .ok()
@@ -165,17 +304,23 @@ fn main() -> io::Result<()> {
     // watcher can't see it. A thread re-fetches every 5s and ships results over a
     // channel; the UI just drains. This is what makes the duplicate-member /
     // stale-triangle staleness impossible: the rail ALWAYS converges on doctor.
+    // It also mtime-watches the herdr config so a herdr theme change re-skins
+    // the pasture within one tick.
     let (roster_tx, roster_rx) = mpsc::channel::<(Vec<RosterMember>, bool)>();
     std::thread::spawn(move || {
         loop {
             let members = RosterRail::fetch();
             let alive = RosterRail::watcher_alive();
+            theme::reload_if_stale();
             if roster_tx.send((members, alive)).is_err() {
                 break; // UI gone
             }
             std::thread::sleep(Duration::from_secs(5));
         }
     });
+
+    // Background job results (compact / summarize).
+    let (jobs_tx, jobs_rx) = mpsc::channel::<Job>();
 
     let pad_name = std::env::current_dir()
         .ok()
@@ -198,11 +343,45 @@ fn main() -> io::Result<()> {
             roster.set_members(members);
             app.watcher_alive = alive;
         }
+        // Drain finished jobs.
+        while let Ok(job) = jobs_rx.try_recv() {
+            app.busy = None;
+            match job {
+                Job::Compact(Ok(msg)) => {
+                    let line = msg.lines().last().unwrap_or("sheared").to_string();
+                    app.flash(line);
+                    messages.refresh();
+                    board.refresh();
+                }
+                Job::Compact(Err(e)) => app.flash(format!("shear failed: {}", e)),
+                Job::Summary(Ok(s)) if !s.is_empty() => {
+                    app.summary = Some(s);
+                    app.summary_scroll = 0;
+                }
+                Job::Summary(Ok(_)) => app.flash("summary came back empty"),
+                Job::Summary(Err(e)) => app.flash(format!("summarize failed: {}", e)),
+            }
+        }
 
         terminal.draw(|f| {
-            use ratatui::style::{Color, Modifier, Style};
+            use ratatui::style::{Modifier, Style};
             use ratatui::text::{Line, Span};
-            use ratatui::widgets::{Block, Borders, Paragraph};
+            use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+            let t = theme::t();
+
+            // Paint the theme background under everything.
+            f.render_widget(
+                Block::default().style(Style::default().bg(t.bg).fg(t.fg)),
+                f.area(),
+            );
+
+            // Pressure floor: below this the layout lies — say so instead.
+            if f.area().width < 42 || f.area().height < 10 {
+                let msg = Paragraph::new("pen too small — 42×10 minimum")
+                    .style(Style::default().fg(t.muted));
+                f.render_widget(msg, f.area());
+                return;
+            }
 
             let show_input = app.tab == 0;
             // Input box grows with content (wrapped), 1..=4 text rows + border.
@@ -226,26 +405,32 @@ fn main() -> io::Result<()> {
             let input_row = if show_input { Some(rows[2]) } else { None };
             let footer_row = rows[rows.len() - 1];
 
-            // ── Header: pad name · tabs · watcher + agent count ──────────
-            let dim = Style::default().fg(Color::Rgb(128, 128, 128));
-            let mut header = vec![
-                Span::styled(" ⛵ ", Style::default().fg(Color::Cyan)),
-                Span::styled(
-                    pad_name.clone(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("   "),
-            ];
-            // running display column for click hit-testing (" ⛵ " renders 4 cells)
-            let mut col: u16 = 4 + pad_name.chars().count() as u16 + 3;
-            for (i, label) in ["Chat", "Tasks"].iter().enumerate() {
+            // ── Header: lamb mark · pad name · tabs · shepherd + grazing count ──
+            let dim = Style::default().fg(t.muted);
+            let mut header = vec![Span::raw(" ")];
+            header.extend(logo::mark());
+            header.push(Span::raw(" "));
+            header.push(Span::styled(
+                pad_name.clone(),
+                Style::default().fg(t.fg).add_modifier(Modifier::BOLD),
+            ));
+            header.push(Span::raw("   "));
+            // running display column for click hit-testing (all width-1 glyphs)
+            let mut col: u16 = header
+                .iter()
+                .map(|s| s.content.chars().count() as u16)
+                .sum();
+            for (i, label) in TAB_LABELS.iter().enumerate() {
                 let w = label.chars().count() as u16 + 2; // " label "
                 app.tab_hits[i] = (col, col + w - 1);
                 col += w + 1; // + separator space
                 if i as u8 == app.tab {
                     header.push(Span::styled(
                         format!(" {} ", label),
-                        Style::default().fg(Color::Black).bg(Color::Cyan),
+                        Style::default()
+                            .fg(t.bg)
+                            .bg(t.accent)
+                            .add_modifier(Modifier::BOLD),
                     ));
                 } else {
                     header.push(Span::styled(format!(" {} ", label), dim));
@@ -255,21 +440,26 @@ fn main() -> io::Result<()> {
             let online = roster
                 .members
                 .iter()
-                .filter(|m| {
-                    matches!(m.live_status, widgets::roster::LiveStatus::Online)
-                })
+                .filter(|m| matches!(m.live_status, widgets::roster::LiveStatus::Online))
                 .count();
             let dot = if app.watcher_alive { "●" } else { "○" };
-            let right_full = format!(
-                "{} {} · {}/{} online ",
-                dot,
-                if app.watcher_alive { "watcher" } else { "watcher DOWN (^S)" },
-                online,
-                roster.members.len(),
-            );
+            let right_full = if app.watcher_alive {
+                format!(
+                    "{} shepherd · {}/{} grazing ",
+                    dot,
+                    online,
+                    roster.members.len()
+                )
+            } else {
+                format!(
+                    "{} shepherd asleep (^S) · {}/{} ",
+                    dot,
+                    online,
+                    roster.members.len()
+                )
+            };
             let right_compact = format!("{} {}/{} ", dot, online, roster.members.len());
-            // +1: the ⛵ renders 2 cells but counts as 1 char.
-            let left_w = 1 + header
+            let left_w = header
                 .iter()
                 .map(|s| s.content.chars().count())
                 .sum::<usize>();
@@ -286,11 +476,7 @@ fn main() -> io::Result<()> {
             header.push(Span::raw(" ".repeat(pad_w)));
             header.push(Span::styled(
                 right,
-                Style::default().fg(if app.watcher_alive {
-                    Color::Green
-                } else {
-                    Color::Red
-                }),
+                Style::default().fg(if app.watcher_alive { t.ok } else { t.err }),
             ));
             f.render_widget(Paragraph::new(Line::from(header)), header_row);
 
@@ -303,7 +489,7 @@ fn main() -> io::Result<()> {
                     }
                 }
             } else {
-                // Floor plan: below 90 cols the agents rail folds away and the
+                // Floor plan: below 90 cols the flock rail folds away and the
                 // conversation takes the full width (still fine at 80×24).
                 let msg_rect = if main_row.width >= 90 {
                     let cols = Layout::default()
@@ -328,15 +514,29 @@ fn main() -> io::Result<()> {
                 // ── Prompt: ALWAYS live. Type → Enter sends. ────────────
                 if let Some(area) = input_row {
                     let me = std::env::var("STITCHPAD_NAME").unwrap_or_else(|_| "smaths".into());
+                    let is_cmd = app.input.starts_with('/');
                     let border = if app.input.is_empty() {
-                        Style::default().fg(Color::Rgb(90, 90, 90))
+                        Style::default().fg(t.faint)
+                    } else if is_cmd {
+                        Style::default().fg(t.special)
                     } else {
-                        Style::default().fg(Color::Cyan)
+                        Style::default().fg(t.accent)
+                    };
+                    let title = if is_cmd {
+                        Line::from(Span::styled(
+                            " command ",
+                            Style::default().fg(t.special),
+                        ))
+                    } else {
+                        Line::from(Span::styled(
+                            format!(" @{} ", me),
+                            Style::default().fg(t.muted),
+                        ))
                     };
                     let content: Line = if app.input.is_empty() {
                         Line::from(Span::styled(
-                            "type to talk · @name wakes them · Enter sends",
-                            dim,
+                            "bleat something · @name wakes them · /help",
+                            Style::default().fg(t.faint),
                         ))
                     } else {
                         // cursor-split render: text before · cursor cell · text after
@@ -353,7 +553,7 @@ fn main() -> io::Result<()> {
                             )),
                             None => spans.push(Span::styled(
                                 "█",
-                                Style::default().fg(Color::Cyan),
+                                Style::default().fg(t.accent),
                             )),
                         }
                         spans.push(Span::raw(after));
@@ -361,28 +561,153 @@ fn main() -> io::Result<()> {
                     };
                     f.render_widget(
                         Paragraph::new(content)
-                            .wrap(ratatui::widgets::Wrap { trim: false })
+                            .wrap(Wrap { trim: false })
                             .block(
                                 Block::default()
                                     .borders(Borders::ALL)
+                                    .border_type(ratatui::widgets::BorderType::Rounded)
                                     .border_style(border)
-                                    .title(format!(" @{} ", me)),
+                                    .title(title),
                             ),
                         area,
                     );
                 }
             }
 
-            // ── Footer: flash message wins, else per-tab hints ───────────
-            let footer_text = if let Some(fmsg) = app.flash_line() {
-                fmsg.to_string()
+            // ── Summary modal: the rumination, scrollable, ^Y copies ─────
+            if let Some(sum) = &app.summary {
+                let rect = widgets::tasks::overlay_rect(f.area(), 72, 70);
+                f.render_widget(Clear, rect);
+                let block = Block::default()
+                    .title(Line::from(vec![
+                        Span::styled(
+                            " rumination ",
+                            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled("· thread summary ", Style::default().fg(t.muted)),
+                    ]))
+                    .title_bottom(Line::from(Span::styled(
+                        " j/k scroll · ^Y copy · Esc close ",
+                        Style::default().fg(t.faint),
+                    )))
+                    .borders(Borders::ALL)
+                    .border_type(ratatui::widgets::BorderType::Rounded)
+                    .border_style(Style::default().fg(t.accent))
+                    .style(Style::default().bg(t.surface));
+                let inner = block.inner(rect);
+                f.render_widget(block, rect);
+                let para = Paragraph::new(sum.clone())
+                    .style(Style::default().fg(t.fg))
+                    .wrap(Wrap { trim: false })
+                    .scroll((app.summary_scroll, 0));
+                f.render_widget(para, inner);
+            }
+
+            // ── Help modal: the field guide ──────────────────────────────
+            if app.help_open {
+                let rect = widgets::tasks::overlay_rect(f.area(), 76, 84);
+                f.render_widget(Clear, rect);
+                let block = Block::default()
+                    .title(Line::from(Span::styled(
+                        " field guide ",
+                        Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                    )))
+                    .title_bottom(Line::from(Span::styled(
+                        " Esc close ",
+                        Style::default().fg(t.faint),
+                    )))
+                    .borders(Borders::ALL)
+                    .border_type(ratatui::widgets::BorderType::Rounded)
+                    .border_style(Style::default().fg(t.accent))
+                    .style(Style::default().bg(t.surface));
+                let inner = block.inner(rect);
+                f.render_widget(block, rect);
+                let head = Style::default().fg(t.accent).add_modifier(Modifier::BOLD);
+                let key = Style::default().fg(t.fg);
+                let blurb = Style::default().fg(t.muted);
+                let mut lines: Vec<Line> = Vec::new();
+                let pad = (inner.width.saturating_sub(22) / 2) as usize;
+                lines.extend(logo::sheep(pad));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled("herding", head)));
+                lines.push(Line::from(vec![
+                    Span::styled("Enter", key),
+                    Span::styled(" send · ", blurb),
+                    Span::styled("@name", key),
+                    Span::styled(" wakes them · ", blurb),
+                    Span::styled("Tab", key),
+                    Span::styled(" completes names & /commands", blurb),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled("^T", key),
+                    Span::styled(" barn · ", blurb),
+                    Span::styled("^R", key),
+                    Span::styled(" refresh · ", blurb),
+                    Span::styled("^Y", key),
+                    Span::styled(" copy convo · ", blurb),
+                    Span::styled("^S", key),
+                    Span::styled(" wake shepherd · ", blurb),
+                    Span::styled("^C", key),
+                    Span::styled(" leave", blurb),
+                ]));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled("the barn", head)));
+                lines.push(Line::from(vec![
+                    Span::styled("h/l", key),
+                    Span::styled(" columns · ", blurb),
+                    Span::styled("j/k", key),
+                    Span::styled(" cards · ", blurb),
+                    Span::styled("Enter", key),
+                    Span::styled(" detail · ", blurb),
+                    Span::styled("]/[", key),
+                    Span::styled(" move · ", blurb),
+                    Span::styled("p", key),
+                    Span::styled(" priority · ", blurb),
+                    Span::styled("d", key),
+                    Span::styled(" done · ", blurb),
+                    Span::styled("x", key),
+                    Span::styled(" cancel", blurb),
+                ]));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled("commands", head)));
+                for (name, args, desc) in SLASH.iter().take(4) {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{:<11}", name), key),
+                        Span::styled(format!("{:<12}", args), Style::default().fg(t.faint)),
+                        Span::styled((*desc).to_string(), blurb),
+                    ]));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![Span::styled(
+                    "flock = agents · grazing = online · shepherd = watcher · shearing = compaction",
+                    Style::default().fg(t.faint).add_modifier(Modifier::ITALIC),
+                )]));
+                f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+            }
+
+            // ── Footer: busy spinner > flash > per-tab hints ─────────────
+            let footer: Line = if let Some(job) = &app.busy {
+                Line::from(vec![
+                    Span::styled(
+                        format!(" {} {}… ", app.spinner(), job),
+                        Style::default().fg(t.warn),
+                    ),
+                    Span::styled("(the flock waits)", Style::default().fg(t.faint)),
+                ])
+            } else if let Some(fmsg) = app.flash_line() {
+                Line::from(Span::styled(fmsg.to_string(), Style::default().fg(t.fg)))
             } else if app.tab == 1 {
-                "j/k:nav  Enter:detail  ]/[:move  d:done  x:cancel  1/^T:chat  q:quit".to_string()
+                Line::from(Span::styled(
+                    "h/l/j/k:nav  Enter:detail  ]/[:move  p:priority  d:done  x:cancel  ?:help  ^T:chat  q:quit",
+                    dim,
+                ))
             } else {
-                "Enter:send  Tab:@complete  drag:copy sel  ^Y:copy convo  wheel/↑↓:scroll  ^T:tasks  ^C:quit"
-                    .to_string()
+                Line::from(Span::styled(
+                    "Enter:send  Tab:complete  /help  /summarize  /compact  ^Y:copy  ^T:tasks  ^C:quit",
+                    dim,
+                ))
             };
-            f.render_widget(Paragraph::new(footer_text).style(dim), footer_row);
+            f.render_widget(Paragraph::new(footer), footer_row);
         })?;
 
         // ── Input ────────────────────────────────────────────────────────
@@ -396,14 +721,18 @@ fn main() -> io::Result<()> {
                         && me.row < app.msg_inner.y + app.msg_inner.height;
                     match me.kind {
                         MouseEventKind::ScrollUp => {
-                            if app.tab == 0 {
+                            if app.summary.is_some() {
+                                app.summary_scroll = app.summary_scroll.saturating_sub(1);
+                            } else if app.tab == 0 {
                                 messages.scroll_up();
                             } else {
                                 board.previous();
                             }
                         }
                         MouseEventKind::ScrollDown => {
-                            if app.tab == 0 {
+                            if app.summary.is_some() {
+                                app.summary_scroll = app.summary_scroll.saturating_add(1);
+                            } else if app.tab == 0 {
                                 messages.scroll_down();
                             } else {
                                 board.next();
@@ -469,144 +798,199 @@ fn main() -> io::Result<()> {
                     }
                 }
                 Event::Key(key) => {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-
-                // Global (both tabs): modifier chords.
-                if ctrl {
-                    match key.code {
-                        KeyCode::Char('c') => break,
-                        KeyCode::Char('t') => {
-                            app.tab ^= 1;
-                            app.detail_open = false;
-                            continue;
-                        }
-                        KeyCode::Char('r') => {
-                            color::invalidate();
-                            roster.refresh();
-                            messages.refresh();
-                            board.refresh();
-                            app.watcher_alive = RosterRail::watcher_alive();
-                            app.flash("refreshed");
-                            continue;
-                        }
-                        KeyCode::Char('y') => {
-                            match copy_conversation(&messages) {
-                                Ok(n) => app.flash(format!("copied {} messages to clipboard", n)),
-                                Err(e) => app.flash(format!("copy failed: {}", e)),
-                            }
-                            continue;
-                        }
-                        KeyCode::Char('s') => {
-                            let _ = std::process::Command::new("stitchpad")
-                                .arg("restart")
-                                .output();
-                            app.watcher_alive = RosterRail::watcher_alive();
-                            app.flash("watcher restarted");
-                            continue;
-                        }
-                        KeyCode::Char('u') => {
-                            app.clear_input();
-                            continue;
-                        }
-                        KeyCode::Char('w') => {
-                            app.delete_word_before(); // readline convention
-                            continue;
-                        }
-                        KeyCode::Char('a') => {
-                            app.cursor = 0;
-                            continue;
-                        }
-                        KeyCode::Char('e') => {
-                            app.cursor = app.char_len();
-                            continue;
-                        }
-                        _ => {}
+                    if key.kind != KeyEventKind::Press {
+                        continue;
                     }
-                }
+                    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-                if app.tab == 1 {
-                    // Tasks tab: no text input → plain vim keys.
-                    match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Esc => {
-                            if app.detail_open {
+                    // ── Modals swallow keys first ────────────────────────
+                    if app.summary.is_some() {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') if !ctrl => {
+                                app.summary = None;
+                            }
+                            KeyCode::Char('j') | KeyCode::Down => {
+                                app.summary_scroll = app.summary_scroll.saturating_add(1)
+                            }
+                            KeyCode::Char('k') | KeyCode::Up => {
+                                app.summary_scroll = app.summary_scroll.saturating_sub(1)
+                            }
+                            KeyCode::PageDown => {
+                                app.summary_scroll = app.summary_scroll.saturating_add(10)
+                            }
+                            KeyCode::PageUp => {
+                                app.summary_scroll = app.summary_scroll.saturating_sub(10)
+                            }
+                            KeyCode::Char('y') if ctrl => {
+                                let text = app.summary.clone().unwrap_or_default();
+                                match copy_text(&text) {
+                                    Ok(()) => app.flash("summary copied"),
+                                    Err(e) => app.flash(format!("copy failed: {}", e)),
+                                }
+                            }
+                            KeyCode::Char('c') if ctrl => break,
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    if app.help_open {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') if !ctrl => {
+                                app.help_open = false
+                            }
+                            KeyCode::Char('c') if ctrl => break,
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // Global (both tabs): modifier chords.
+                    if ctrl {
+                        match key.code {
+                            KeyCode::Char('c') => break,
+                            KeyCode::Char('t') => {
+                                app.tab ^= 1;
                                 app.detail_open = false;
-                            } else {
+                                continue;
+                            }
+                            KeyCode::Char('r') => {
+                                color::invalidate();
+                                let label = theme::load();
+                                roster.refresh();
+                                messages.refresh();
+                                board.refresh();
+                                app.watcher_alive = RosterRail::watcher_alive();
+                                app.flash(format!("refreshed · theme {}", label));
+                                continue;
+                            }
+                            KeyCode::Char('y') => {
+                                match copy_conversation(&messages) {
+                                    Ok(n) => {
+                                        app.flash(format!("copied {} messages to clipboard", n))
+                                    }
+                                    Err(e) => app.flash(format!("copy failed: {}", e)),
+                                }
+                                continue;
+                            }
+                            KeyCode::Char('s') => {
+                                let _ = std::process::Command::new("stitchpad")
+                                    .arg("restart")
+                                    .output();
+                                app.watcher_alive = RosterRail::watcher_alive();
+                                app.flash("the shepherd is awake");
+                                continue;
+                            }
+                            KeyCode::Char('u') => {
+                                app.clear_input();
+                                continue;
+                            }
+                            KeyCode::Char('w') => {
+                                app.delete_word_before(); // readline convention
+                                continue;
+                            }
+                            KeyCode::Char('a') => {
+                                app.cursor = 0;
+                                continue;
+                            }
+                            KeyCode::Char('e') => {
+                                app.cursor = app.char_len();
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if app.tab == 1 {
+                        // Barn: no text input → plain vim keys.
+                        match key.code {
+                            KeyCode::Char('q') => break,
+                            KeyCode::Esc => {
+                                if app.detail_open {
+                                    app.detail_open = false;
+                                } else {
+                                    app.tab = 0;
+                                }
+                            }
+                            KeyCode::Char('t') | KeyCode::Char('1') => {
                                 app.tab = 0;
+                                app.detail_open = false;
+                            }
+                            KeyCode::Char('?') => app.help_open = true,
+                            KeyCode::Char('j') | KeyCode::Down => board.next_in_column(),
+                            KeyCode::Char('k') | KeyCode::Up => board.prev_in_column(),
+                            KeyCode::Char('h') | KeyCode::Left => board.move_column(false),
+                            KeyCode::Char('l') | KeyCode::Right => board.move_column(true),
+                            KeyCode::Enter => app.detail_open = !app.detail_open,
+                            KeyCode::Char(']') => board.move_selected(true),
+                            KeyCode::Char('[') => board.move_selected(false),
+                            KeyCode::Char('p') => board.cycle_priority(),
+                            KeyCode::Char('d') => board.set_selected_status("done"),
+                            KeyCode::Char('x') => board.set_selected_status("canceled"),
+                            KeyCode::Char('r') => board.refresh(),
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // Pasture tab: everything printable belongs to the prompt.
+                    match key.code {
+                        KeyCode::Enter => {
+                            let text = app.input.trim().to_string();
+                            if text.starts_with('/') {
+                                app.clear_input();
+                                app.handle_slash(&text, &jobs_tx);
+                            } else if !text.is_empty() {
+                                let ok = std::process::Command::new("stitchpad")
+                                    .arg("say")
+                                    .arg(&text)
+                                    .output()
+                                    .map(|o| o.status.success())
+                                    .unwrap_or(false);
+                                if ok {
+                                    app.clear_input();
+                                    messages.refresh();
+                                } else {
+                                    app.flash("send failed — is this a pad dir?");
+                                }
                             }
                         }
-                        KeyCode::Char('t') | KeyCode::Char('1') => {
-                            app.tab = 0;
-                            app.detail_open = false;
+                        KeyCode::Esc => app.clear_input(),
+                        KeyCode::Backspace => app.backspace(),
+                        KeyCode::Delete => app.delete_at(),
+                        KeyCode::Left => app.cursor = app.cursor.saturating_sub(1),
+                        KeyCode::Right => app.cursor = (app.cursor + 1).min(app.char_len()),
+                        KeyCode::Home => app.cursor = 0,
+                        KeyCode::End => app.cursor = app.char_len(),
+                        KeyCode::Tab => {
+                            // completion (only when the cursor sits at the end,
+                            // where the token being typed lives).
+                            if app.cursor == app.char_len() {
+                                if let Some(done) = complete_slash(&app.input) {
+                                    app.input = done;
+                                    app.cursor = app.char_len();
+                                } else if let Some(done) =
+                                    complete_mention(&app.input, &roster.members)
+                                {
+                                    app.input = done;
+                                    app.cursor = app.char_len();
+                                }
+                            }
                         }
-                        KeyCode::Char('j') | KeyCode::Down => board.next(),
-                        KeyCode::Char('k') | KeyCode::Up => board.previous(),
-                        KeyCode::Enter => app.detail_open = !app.detail_open,
-                        KeyCode::Char(']') => board.move_selected(true),
-                        KeyCode::Char('[') => board.move_selected(false),
-                        KeyCode::Char('d') => board.set_selected_status("done"),
-                        KeyCode::Char('x') => board.set_selected_status("canceled"),
-                        KeyCode::Char('r') => board.refresh(),
+                        KeyCode::Up | KeyCode::PageUp => {
+                            let n = if key.code == KeyCode::PageUp { 10 } else { 1 };
+                            for _ in 0..n {
+                                messages.scroll_up();
+                            }
+                        }
+                        KeyCode::Down | KeyCode::PageDown => {
+                            let n = if key.code == KeyCode::PageDown { 10 } else { 1 };
+                            for _ in 0..n {
+                                messages.scroll_down();
+                            }
+                        }
+                        KeyCode::Char(c) => app.insert_str(&c.to_string()),
                         _ => {}
                     }
-                    continue;
-                }
-
-                // Chat tab: everything printable belongs to the prompt.
-                match key.code {
-                    KeyCode::Enter => {
-                        let text = app.input.trim().to_string();
-                        if !text.is_empty() {
-                            let ok = std::process::Command::new("stitchpad")
-                                .arg("say")
-                                .arg(&text)
-                                .output()
-                                .map(|o| o.status.success())
-                                .unwrap_or(false);
-                            if ok {
-                                app.clear_input();
-                                messages.refresh();
-                            } else {
-                                app.flash("send failed — is this a pad dir?");
-                            }
-                        }
-                    }
-                    KeyCode::Esc => app.clear_input(),
-                    KeyCode::Backspace => app.backspace(),
-                    KeyCode::Delete => app.delete_at(),
-                    KeyCode::Left => app.cursor = app.cursor.saturating_sub(1),
-                    KeyCode::Right => app.cursor = (app.cursor + 1).min(app.char_len()),
-                    KeyCode::Home => app.cursor = 0,
-                    KeyCode::End => app.cursor = app.char_len(),
-                    KeyCode::Tab => {
-                        // @name completion (only when the cursor sits at the end,
-                        // where the @-token being typed lives).
-                        if app.cursor == app.char_len() {
-                            if let Some(done) = complete_mention(&app.input, &roster.members)
-                            {
-                                app.input = done;
-                                app.cursor = app.char_len();
-                            }
-                        }
-                    }
-                    KeyCode::Up | KeyCode::PageUp => {
-                        let n = if key.code == KeyCode::PageUp { 10 } else { 1 };
-                        for _ in 0..n {
-                            messages.scroll_up();
-                        }
-                    }
-                    KeyCode::Down | KeyCode::PageDown => {
-                        let n = if key.code == KeyCode::PageDown { 10 } else { 1 };
-                        for _ in 0..n {
-                            messages.scroll_down();
-                        }
-                    }
-                    KeyCode::Char(c) => app.insert_str(&c.to_string()),
-                    _ => {}
-                }
                 }
                 Event::Paste(s) => {
                     // Bracketed paste: land the WHOLE paste in the input as one
@@ -631,6 +1015,18 @@ fn main() -> io::Result<()> {
     )?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+/// Complete a leading `/command` prefix against the slash table. Only fires when
+/// the whole input is one /token (commands live at line start).
+fn complete_slash(input: &str) -> Option<String> {
+    if !input.starts_with('/') || input.contains(' ') {
+        return None;
+    }
+    let hit = SLASH
+        .iter()
+        .find(|(name, _, _)| name.starts_with(input) && *name != input)?;
+    Some(format!("{} ", hit.0))
 }
 
 /// Complete the trailing `@prefix` token against roster names. Returns the new
@@ -733,5 +1129,17 @@ mod tests {
         assert_eq!(complete_mention("@codex hi", &members), None);
         // no match
         assert_eq!(complete_mention("@zz", &members), None);
+    }
+
+    #[test]
+    fn completes_slash_commands() {
+        assert_eq!(complete_slash("/sum").as_deref(), Some("/summarize "));
+        assert_eq!(complete_slash("/com").as_deref(), Some("/compact "));
+        assert_eq!(complete_slash("/she").as_deref(), Some("/shear "));
+        // full command with args → leave it alone
+        assert_eq!(complete_slash("/summarize 50"), None);
+        // not a slash line
+        assert_eq!(complete_slash("hey /sum"), None);
+        assert_eq!(complete_slash("plain"), None);
     }
 }

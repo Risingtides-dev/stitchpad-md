@@ -6,7 +6,7 @@
 //! show a muted `[image: …]` placeholder.
 
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::Span,
 };
 
@@ -22,7 +22,10 @@ pub fn parse_line(line: &str) -> Vec<Span<'static>> {
 
     // bullet prefix: "- foo" / "* foo" (list, not italic) → "• foo"
     let body = if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-        spans.push(Span::styled("• ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            "• ",
+            Style::default().fg(crate::theme::t().faint),
+        ));
         rest
     } else {
         line
@@ -88,7 +91,11 @@ fn match_marker(chars: &[char], i: usize) -> Option<(usize, String, Style)> {
     if chars[i] == '`' {
         if let Some(end) = find_close(chars, i + 1, &['`']) {
             let inner: String = chars[i + 1..end].iter().collect();
-            return Some((end + 1 - i, inner, Style::default().fg(Color::Yellow)));
+            return Some((
+                end + 1 - i,
+                inner,
+                Style::default().fg(crate::theme::t().warn),
+            ));
         }
     }
     None
@@ -120,10 +127,12 @@ mod tests {
         let s = parse_line("a **b** c *d* `e`");
         // segments: "a ", "b", " c ", "d", " ", "e"
         assert_eq!(texts(&s), vec!["a ", "b", " c ", "d", " ", "e"]);
-        // styles applied where expected
+        // styles applied where expected (code color comes from the live theme —
+        // theme state is global and tests run in parallel, so assert presence,
+        // not a specific palette value)
         assert!(s[1].style.add_modifier.contains(Modifier::BOLD));
         assert!(s[3].style.add_modifier.contains(Modifier::ITALIC));
-        assert_eq!(s[5].style.fg, Some(Color::Yellow));
+        assert!(s[5].style.fg.is_some());
     }
 
     #[test]
