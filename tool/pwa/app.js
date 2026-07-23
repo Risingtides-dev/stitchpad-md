@@ -45,7 +45,7 @@ function fmt(t) {
   t = esc(t);
   t = t.replace(/```([\s\S]*?)```/g, (m, c) => `<div class="cb"><button class="cpy" title="copy">copy</button><pre>${c.trim()}</pre></div>`);
   t = t.replace(/`([^`]+)`/g, "<code>$1</code>");
-  t = t.replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g, (m, alt, url) => `<img class="msg-img" src="${url}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">`);
+  t = t.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|\/(?:img|f)\/)[^\s)]+)\)/g, (m, alt, url) => `<img class="msg-img" src="${url}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">`);
   t = t.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
   t = t.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
   t = t.replace(/(^|[\s(])@([a-zA-Z0-9_-]+)/g, (m, p, n) => `${p}<b style="color:${colorFor(n)}">@${n}</b>`);
@@ -85,7 +85,7 @@ function fmtMd(t, ctx) {
   const inline = s => s
     .replace(/\u0000(\d+)\u0000/g, (m, i) => `<code>${codes[+i].code}</code>`)
     .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g, (m, alt, url) => `<img class="msg-img" src="${url}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">`)
+    .replace(/!\[([^\]]*)\]\(((?:https?:\/\/|\/(?:img|f)\/)[^\s)]+)\)/g, (m, alt, url) => `<img class="msg-img" src="${url}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">`)
     .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
     .replace(/(^|[\s(])\*([^*\n]+)\*(?=$|[\s).,;:!?])/g, "$1<i>$2</i>")
     .replace(/(?<!["'=])(https?:\/\/[^\s<">]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>')
