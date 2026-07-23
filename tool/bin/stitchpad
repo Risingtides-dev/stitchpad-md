@@ -824,6 +824,40 @@ PY
     echo "✓ posted as @$from (#$mid)"
     ;;
 
+  drop)
+    # Shared files: copy a doc into the pad's dropbox/ (local truth every
+    # agent + the TUI shed tab can read), mirror it to the relay when creds
+    # exist (so the PWA can view it via /f/…), and post one pad line. The pad
+    # line IS the files feed — every surface derives its files view from it.
+    #   stitchpad drop <file> [note...]
+    sp_init_paths || exit 1
+    from="$(sp_me)"
+    [ -z "$from" ] && { echo "stitchpad: no identity — join first (or set STITCHPAD_NAME)" >&2; exit 1; }
+    src="${1:?usage: stitchpad drop <file> [note...]}"; shift || true
+    note="$*"
+    [ -f "$src" ] || { echo "stitchpad: file not found: $src" >&2; exit 1; }
+    fsize="$(stat -f %z "$src" 2>/dev/null || stat -c %s "$src" 2>/dev/null || echo 0)"
+    [ "$fsize" -le $((15 * 1024 * 1024)) ] || { echo "stitchpad: file too large (15MB cap)" >&2; exit 1; }
+    fname="$(basename "$src" | tr -d '[]()' | tr ' ' '_')"
+    mkdir -p "$PAD_DIR/dropbox"
+    cp "$src" "$PAD_DIR/dropbox/$fname"
+    # human-readable size
+    if [ "$fsize" -ge 1048576 ]; then hsize="$(( fsize / 1048576 ))MB"
+    elif [ "$fsize" -ge 1024 ]; then hsize="$(( fsize / 1024 ))KB"
+    else hsize="${fsize}B"; fi
+    link=""
+    relay="${PASTURE_RELAY:-${STITCHPAD_RELAY:-}}"; token="${PASTURE_TOKEN:-${STITCHPAD_TOKEN:-}}"
+    if [ -n "$relay" ] && [ -n "$token" ]; then
+      pad_name="$(basename "$(dirname "$PAD_DIR")")"
+      resp="$(curl -fsS -H "authorization: Bearer $token" -F "file=@$PAD_DIR/dropbox/$fname" "${relay%/}/upload-file?pad=$pad_name" 2>/dev/null || true)"
+      key="$(printf '%s' "$resp" | jq -r '.key // empty' 2>/dev/null || true)"
+      [ -n "$key" ] && link=" [view](/f/${key#files/})"
+    fi
+    line="📎 **$fname** · $hsize → dropbox/$fname$link"
+    [ -n "$note" ] && line="$line — $note"
+    STITCHPAD_NAME="$from" "$BIN_DIR/stitchpad" say "$line"
+    ;;
+
   react)
     # React to a message: an append-only system line other surfaces aggregate
     # into chips under the target. Never wakes anyone (system lines don't trip

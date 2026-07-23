@@ -46,6 +46,9 @@ function fmt(t) {
   t = t.replace(/```([\s\S]*?)```/g, (m, c) => `<div class="cb"><button class="cpy" title="copy">copy</button><pre>${c.trim()}</pre></div>`);
   t = t.replace(/`([^`]+)`/g, "<code>$1</code>");
   t = t.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|\/(?:img|f)\/)[^\s)]+)\)/g, (m, alt, url) => `<img class="msg-img" src="${url}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">`);
+  // [text](url) markdown links — scheme-restricted (https?: or our /img /f
+  // media routes) so a hostile pad line can never mint a javascript: href
+  t = t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|\/(?:img|f)\/)[^\s)]+)\)/g, (m, txt, url) => `<a href="${url}" target="_blank" rel="noopener">${txt}</a>`);
   t = t.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
   t = t.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
   t = t.replace(/(^|[\s(])@([a-zA-Z0-9_-]+)/g, (m, p, n) => `${p}<b style="color:${colorFor(n)}">@${n}</b>`);
@@ -86,6 +89,7 @@ function fmtMd(t, ctx) {
     .replace(/\u0000(\d+)\u0000/g, (m, i) => `<code>${codes[+i].code}</code>`)
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/!\[([^\]]*)\]\(((?:https?:\/\/|\/(?:img|f)\/)[^\s)]+)\)/g, (m, alt, url) => `<img class="msg-img" src="${url}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">`)
+    .replace(/\[([^\]]+)\]\(((?:https?:\/\/|\/(?:img|f)\/)[^\s)]+)\)/g, (m, txt, url) => `<a href="${url}" target="_blank" rel="noopener">${txt}</a>`)
     .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
     .replace(/(^|[\s(])\*([^*\n]+)\*(?=$|[\s).,;:!?])/g, "$1<i>$2</i>")
     .replace(/(?<!["'=])(https?:\/\/[^\s<">]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>')
@@ -149,6 +153,7 @@ const store = {
   rxMap: {},          // #m-id → {emoji: [who…]} — reaction chips
   replyTo: null,      // {id, who} while composing a threaded reply
   threads: {},        // #m-id → true when a thread is expanded
+  filesOpen: false,   // shed panel — files derived from 📎 pad lines
 };
 const subs = new Set();
 const publish = () => subs.forEach(f => f());
@@ -904,6 +909,36 @@ function Composer() {
   </div>`;
 }
 
+// ── the shed: shared files, derived from 📎 pad lines ────────
+// `stitchpad drop` and the paperclip both post one 📎 line; this panel is
+// just a collected view of those lines — the pad stays the only state.
+function shedFiles(blocks) {
+  const out = [];
+  for (const b of blocks || []) {
+    if (b.sys) continue;
+    for (const line of b.body || []) {
+      const m = line.match(/^📎 \*\*(.+?)\*\* · (\S+) → (\S+?)((?:\s+\[view\]\((\S+)\))?)(?:\s+—\s+(.+))?$/);
+      if (m) out.push({ name: m[1], size: m[2], link: m[5] || null, note: m[6] || "", who: b.who, t: b.t });
+    }
+  }
+  return out.reverse(); // newest first
+}
+function FilesPanel() {
+  const s = useStore();
+  const files = shedFiles(s.blocks);
+  return html`<div class="sum-panel">
+    <h3>🗄 The shed <span class="sub">#${s.pad} · ${files.length} file${files.length === 1 ? "" : "s"}</span><button class="x" aria-label="close" onClick=${() => { store.filesOpen = false; publish(); }}>✕</button></h3>
+    <div class="body">
+      ${!files.length && html`<div class="doc-empty">nothing on the shelf — agents \`stitchpad drop\` docs here; the 📎 button attaches from the phone</div>`}
+      ${files.map(f => html`<div class="shed-row" key=${f.name + f.t}>
+        ${f.link ? html`<a class="shed-name" href=${f.link} target="_blank" rel="noopener">${f.name}</a>` : html`<span class="shed-name">${f.name}</span>`}
+        <span class="shed-meta">${f.size} · @${f.who} · ${f.t}</span>
+        ${f.note && html`<span class="shed-note">${f.note}</span>`}
+      </div>`)}
+    </div>
+  </div>`;
+}
+
 // ── doctor: the pad's vitals, straight from the bridge ───────
 const fmtAge = s => s < 0 ? "none" : s < 90 ? s + "s" : s < 5400 ? Math.round(s / 60) + "m" : Math.round(s / 3600) + "h";
 function DoctorPanel() {
@@ -952,6 +987,7 @@ function App() {
         <span class="name">${s.dmWith ? "@" + s.dmWith : "# " + (s.pad || "…")}</span>
         ${!s.dmWith && html`<span class="meta">${s.doc ? members + " members" : ""}</span>`}
         ${!s.dmWith && html`<button id="taskbtn" title="kanban board — tasks parsed live from the pad" onClick=${() => { store.boardOpen = true; publish(); }}><${Icon} n="tasks"/><span class="lbl">tasks</span></button>`}
+        ${!s.dmWith && html`<button id="filebtn" title="the shed — shared files dropped by agents + phone" onClick=${() => { store.filesOpen = !store.filesOpen; publish(); }}>🗄<span class="lbl">files</span></button>`}
         ${!s.dmWith && html`<button id="docbtn" title="pad vitals — heartbeats, wakes, locks, deliveries" onClick=${openDoctor}>♥<span class="lbl">vitals</span></button>`}
         ${!s.dmWith && html`<button id="sumbtn" title="summarize this thread" disabled=${s.summarizing} onClick=${requestSummary}>${s.summarizing ? "…" : html`<${Icon} n="summarize"/>`}<span class="lbl">${s.summarizing ? "summarizing" : "summarize"}</span></button>`}
       </div>
@@ -960,7 +996,7 @@ function App() {
       <${Log}/>
       <${Composer}/>
       ${s.doctorOpen && html`<${DoctorPanel}/>`}
-      ${s.boardOpen && html`<${BoardPanel}/>`}
+      ${s.filesOpen && html`<${FilesPanel}/>`}
       ${s.boardOpen && html`<${BoardPanel}/>`}
       ${s.summaryOpen && s.summary && html`<div class="sum-panel">
         <h3><${Icon} n="summarize"/> Thread summary <span class="sub">#${s.pad}</span><button class="x" aria-label="close" onClick=${() => { store.summaryOpen = false; publish(); }}>✕</button></h3>
