@@ -64,6 +64,31 @@ const RENDER = {
     );
   },
 
+  timeline: d => {
+    // glyph+color paired per state; `st` is whitelisted before it reaches a
+    // class name, so raw payload never lands unescaped in an attribute.
+    const glyph = { done: "✓", active: "▸", todo: "·", failed: "✕" };
+    return (
+      title(d.title) +
+      `<ol class="ui-tl">` +
+      d.events
+        .map(e => {
+          const st = glyph[e.state] ? e.state : "todo";
+          return (
+            `<li class="tl-ev tl-${st}">` +
+            `<span class="tl-dot">${glyph[st]}</span>` +
+            `<div class="tl-body"><div class="tl-head"><span class="tl-label">${h(e.label)}</span>` +
+            (e.at ? `<span class="tl-at">${h(e.at)}</span>` : "") +
+            `</div>` +
+            (e.note ? `<div class="tl-note">${h(e.note)}</div>` : "") +
+            `</div></li>`
+          );
+        })
+        .join("") +
+      `</ol>`
+    );
+  },
+
   // ── data ─────────────────────────────────────────────────────
   table: d => {
     const numeric = ci => d.rows.length > 0 && d.rows.every(r => r[ci] === undefined || /^-?[\d,.%$]+$/.test(String(r[ci]).trim()));

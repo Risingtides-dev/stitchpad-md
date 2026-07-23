@@ -379,6 +379,22 @@ button{font:inherit}
 .ck-done .ck-box{border-color:var(--ok);background:rgba(63,185,80,.12)}
 .ui-meter{height:4px;background:var(--panel-2);border-radius:99px;overflow:hidden;margin:2px 0}
 .ui-meter i{display:block;height:100%;background:var(--teal);border-radius:99px;transition:width .3s var(--ease)}
+/* timeline — reusable event rail */
+.ui-tl{list-style:none;margin:2px 0 0;padding:0}
+.tl-ev{position:relative;display:flex;gap:10px;padding-bottom:9px}
+.tl-ev::before{content:"";position:absolute;left:6px;top:15px;bottom:-1px;width:1px;background:var(--edge)}
+.tl-ev:last-child{padding-bottom:0}
+.tl-ev:last-child::before{display:none}
+.tl-dot{position:relative;z-index:1;flex:none;width:13px;height:15px;display:flex;align-items:center;justify-content:center;font-size:11px;line-height:1;font-weight:700;color:var(--faint);background:var(--panel)}
+.tl-body{flex:1;min-width:0}
+.tl-head{display:flex;align-items:baseline;gap:8px}
+.tl-label{font:600 13px inherit;color:var(--txt)}
+.tl-at{margin-left:auto;font:500 11.5px inherit;color:var(--faint);font-variant-numeric:tabular-nums;white-space:nowrap}
+.tl-note{font:500 12px inherit;color:var(--dim);margin-top:1px}
+.tl-done .tl-dot{color:var(--ok)}
+.tl-active .tl-dot,.tl-active .tl-label{color:var(--teal)}
+.tl-failed .tl-dot,.tl-failed .tl-label{color:var(--err)}
+.tl-todo .tl-label{color:var(--dim)}
 /* table */
 .ui-tblwrap{overflow-x:auto}
 .ui-tbl{border-collapse:collapse;font-size:12.5px;min-width:60%}

@@ -53,6 +53,30 @@ export const SCHEMAS = {
     },
   },
 
+  timeline: {
+    doc: "Vertical rail of labeled events with state — a reusable temporal primitive. Presets (e.g. run-report: steps + pass/fail + duration) compose over it.",
+    schema: {
+      type: "object",
+      required: ["events"],
+      properties: {
+        title: short,
+        events: {
+          type: "array",
+          items: {
+            type: "object",
+            required: ["label"],
+            properties: {
+              label: short,
+              at: short, // freeform timestamp/duration, e.g. "14:32" or "1.2s"
+              state: { enum: ["done", "active", "todo", "failed"] },
+              note: str(500),
+            },
+          },
+        },
+      },
+    },
+  },
+
   // ── data ─────────────────────────────────────────────────────
   table: {
     doc: "Small data table (≤ 200 rows). Right-align numbers automatically.",
