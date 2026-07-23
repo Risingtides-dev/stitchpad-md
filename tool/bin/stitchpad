@@ -5,6 +5,9 @@
 #   stitchpad join <name> <adapter> [wake] [target]   add a participant to the roster
 #   STITCHPAD_NAME=<you> stitchpad say [--re <#m-id>] [--image <path>] <text...>   post a message (auto-commits; --re threads it)
 #   STITCHPAD_NAME=<you> stitchpad react <#m-id> <emoji>   react to a message (toggle; never wakes)
+#   STITCHPAD_NAME=<you> stitchpad amend <#m-id> <text|--file f>   rewrite YOUR message's body in place (live cards)
+#   STITCHPAD_NAME=<you> stitchpad run [--title t] <label>=<cmd>...   run steps as a live-amending ui timeline
+#   STITCHPAD_NAME=<you> stitchpad drop <file> [note]   share a doc: dropbox/ + relay mirror + one 📎 pad line
 #   stitchpad read [-n N]                 print the recent conversation (plain)
 #   stitchpad meta set|get <name> <key> [value] runtime/model metadata
 #   stitchpad dnd on|off [--drain]|status silence/resume wake delivery
@@ -822,6 +825,140 @@ PY
     rm -f "$PAD_STATE/pending.$from" "$PAD_STATE/delivered_no_reply.$from" 2>/dev/null
     sp_unlock
     echo "✓ posted as @$from (#$mid)"
+    ;;
+
+  amend)
+    # Edit-in-place by message id: replace the BODY of one of YOUR messages
+    # (header, id, and thread linkage untouched). This is what makes live
+    # cards possible — a posted ui timeline amends as its run progresses, and
+    # every surface just re-parses. Append-only spirit survives: each amend is
+    # one git commit, so history holds every version.
+    #   stitchpad amend <#m-id> <text...>
+    #   stitchpad amend <#m-id> --file <path>
+    sp_init_paths || exit 1
+    from="$(sp_me)"
+    [ -z "$from" ] && { echo "stitchpad: no identity — join first (or set STITCHPAD_NAME)" >&2; exit 1; }
+    target="${1:?usage: stitchpad amend <#m-id> <text...|--file <path>>}"; shift
+    target="${target#\#}"
+    bodyf="$(mktemp)"
+    if [ "${1:-}" = "--file" ]; then
+      # -r not -f: process substitution (/dev/fd/N) is a legitimate source
+      [ -r "${2:-}" ] || { rm -f "$bodyf"; echo "stitchpad: --file needs a readable path" >&2; exit 1; }
+      cat "$2" > "$bodyf"
+    else
+      [ $# -gt 0 ] || { rm -f "$bodyf"; echo "usage: stitchpad amend <#m-id> <text...|--file <path>>" >&2; exit 1; }
+      printf '%s' "$*" > "$bodyf"
+    fi
+    sp_lock || { rm -f "$bodyf"; exit 1; }
+    python3 - "$PAD_MD" "$target" "$from" "$bodyf" <<'PY'
+import re, sys
+pad, mid, who, bodyf = sys.argv[1:5]
+lines = open(pad, encoding="utf-8", errors="replace").read().split("\n")
+hit = -1
+for i, ln in enumerate(lines):
+    if not ln.startswith("## @"):
+        continue
+    segs = [s.strip() for s in ln[3:].split(" · ")]
+    if f"#{mid}" in segs:
+        hit = i
+        author = segs[0].lstrip("@")
+        break
+if hit < 0:
+    sys.exit(2)          # id not found
+if author != who:
+    sys.exit(3)          # not your message
+end = len(lines)
+for j in range(hit + 1, len(lines)):
+    if lines[j].startswith("## @") or re.match(r"^\*@\S+ reacted ", lines[j]):
+        end = j
+        break
+body = open(bodyf, encoding="utf-8", errors="replace").read().rstrip("\n")
+new = lines[:hit + 1] + ["", body, ""] + lines[end:]
+open(pad, "w", encoding="utf-8").write("\n".join(new))
+PY
+    rc=$?
+    rm -f "$bodyf"
+    case "$rc" in
+      0) sp_commit "amend: $from #$target"; sp_unlock; echo "✓ amended #$target" ;;
+      2) sp_unlock; echo "stitchpad: message #$target not found" >&2; exit 1 ;;
+      3) sp_unlock; echo "stitchpad: #$target is not your message — only the author amends" >&2; exit 1 ;;
+      *) sp_unlock; echo "stitchpad: amend failed" >&2; exit 1 ;;
+    esac
+    ;;
+
+  run)
+    # Execution timeline: run labeled steps and narrate them as ONE live
+    # ui timeline message that amends in place as states flip — the agent's
+    # run becomes a living card in the room. Stops on first failure and
+    # threads the failing output under the timeline as a real artifact.
+    #   stitchpad run [--title <t>] <label>=<cmd> [<label>=<cmd> ...]
+    sp_init_paths || exit 1
+    from="$(sp_me)"
+    [ -z "$from" ] && { echo "stitchpad: no identity — join first (or set STITCHPAD_NAME)" >&2; exit 1; }
+    title="execution"
+    labels=(); cmds=()
+    while [ $# -gt 0 ]; do case "$1" in
+      --title) title="${2:-execution}"; shift 2 ;;
+      *=*) labels+=("${1%%=*}"); cmds+=("${1#*=}"); shift ;;
+      *) echo "usage: stitchpad run [--title <t>] <label>=<cmd> [...]" >&2; exit 1 ;;
+    esac; done
+    [ "${#labels[@]}" -gt 0 ] || { echo "usage: stitchpad run [--title <t>] <label>=<cmd> [...]" >&2; exit 1; }
+    n=${#labels[@]}
+    states=(); ats=(); notes=()
+    for _ in "${labels[@]}"; do states+=("todo"); ats+=(""); notes+=(""); done
+
+    _tl_body() { # $1 = alt line → prints full message body (alt + fence)
+      local ev='[]' i
+      for i in $(seq 0 $((n - 1))); do
+        ev="$(jq -c --arg l "${labels[$i]}" --arg s "${states[$i]}" --arg a "${ats[$i]}" --arg no "${notes[$i]}" \
+          '. + [{label:$l, state:$s} + (if $a != "" then {at:$a} else {} end) + (if $no != "" then {note:$no} else {} end)]' <<< "$ev")"
+      done
+      printf '%s\n\n```ui timeline\n%s\n```' "$1" \
+        "$(jq -nc --arg t "$title" --argjson e "$ev" '{title:$t, events:$e}')"
+    }
+
+    _amend_tl() { # $1 = alt line → amend the live timeline message
+      local f; f="$(mktemp)"
+      _tl_body "$1" > "$f"
+      STITCHPAD_NAME="$from" "$BIN_DIR/stitchpad" amend "$mid" --file "$f" >/dev/null
+      rm -f "$f"
+    }
+
+    states[0]="active"
+    out="$(STITCHPAD_NAME="$from" "$BIN_DIR/stitchpad" say "$(_tl_body "⏱ $title — running (${n} steps)")")" || exit 1
+    mid="$(printf '%s' "$out" | grep -o 'm-[a-z0-9]*' | head -1)"
+    [ -n "$mid" ] || { echo "stitchpad: could not capture timeline message id" >&2; exit 1; }
+
+    failed=""
+    total_t0=$SECONDS
+    for i in $(seq 0 $((n - 1))); do
+      states[$i]="active"
+      _amend_tl "⏱ $title — running: ${labels[$i]}"
+      t0=$SECONDS
+      step_out="$(bash -c "${cmds[$i]}" 2>&1)"
+      rc=$?
+      ats[$i]="$((SECONDS - t0))s"
+      if [ $rc -eq 0 ]; then
+        states[$i]="done"
+      else
+        states[$i]="failed"
+        notes[$i]="exit $rc"
+        failed="${labels[$i]}"
+        _amend_tl "⏱ $title — ✕ failed at ${labels[$i]}"
+        # the failing output is the artifact — thread it under the timeline
+        tail_out="$(printf '%s' "$step_out" | tail -c 2000)"
+        STITCHPAD_NAME="$from" "$BIN_DIR/stitchpad" say --re "$mid" "$(printf '%s failed (exit %s) — output tail:\n\n```\n%s\n```' "${labels[$i]}" "$rc" "$tail_out")" >/dev/null
+        break
+      fi
+      _amend_tl "⏱ $title — ${labels[$i]} done"
+    done
+    if [ -z "$failed" ]; then
+      _amend_tl "⏱ $title — ✓ all $n steps green ($((SECONDS - total_t0))s)"
+      echo "✓ run complete: $n steps green (#$mid)"
+    else
+      echo "✕ run failed at $failed (#$mid)"
+      exit 1
+    fi
     ;;
 
   drop)

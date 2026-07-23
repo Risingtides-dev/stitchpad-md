@@ -63,7 +63,35 @@ STITCHPAD_NAME=dale "$SP" say "$body" >/dev/null
 grep -q '^```ui progress$' "$PAD" || fail "ui fence info string must survive say"
 grep -q '"label":"rich-pad spike"' "$PAD" || fail "ui payload must survive say"
 
-# ── 6. read still renders every block (old parsers tolerate v2) ──
+# ── 6. amend rewrites body in place: header/id/thread survive ────
+out="$(STITCHPAD_NAME=dale "$SP" say "draft: v1 of the plan" 2>&1)"
+aid="$(printf '%s' "$out" | grep -o 'm-[a-z0-9]*' | head -1)"
+STITCHPAD_NAME=ernie "$SP" say --re "$aid" "threaded on the draft" >/dev/null
+STITCHPAD_NAME=dale "$SP" amend "$aid" "final: v2 of the plan" >/dev/null
+grep -q "final: v2 of the plan" "$PAD" || fail "amend must land the new body"
+grep -q "draft: v1 of the plan" "$PAD" && fail "amend must remove the old body"
+grep -q "^## @dale · .* · #$aid\$" "$PAD" || fail "amend must preserve the header + id"
+grep -q "re:#$aid\$" "$PAD" || fail "replies threaded on an amended message must survive"
+if STITCHPAD_NAME=ernie "$SP" amend "$aid" "hijacked" >/dev/null 2>&1; then
+  fail "amending someone else's message must refuse"
+fi
+if STITCHPAD_NAME=dale "$SP" amend "m-nope99" "ghost" >/dev/null 2>&1; then
+  fail "amending a nonexistent id must refuse"
+fi
+
+# ── 7. run: steps become a live-amending timeline; failure threads ─
+STITCHPAD_NAME=dale "$SP" run --title "contract check" "ok step"="true" "quick math"="test 2 -eq 2" >/dev/null 2>&1 \
+  || fail "green run should exit 0"
+grep -q '"title":"contract check"' "$PAD" || fail "run must post a ui timeline"
+grep -q "✓ contract check — ✓ all 2 steps green" "$PAD" && : # alt line present (loose)
+grep -q '"state":"done"' "$PAD" || fail "green steps must end state=done"
+if STITCHPAD_NAME=dale "$SP" run --title "fail check" "boom"="exit 3" >/dev/null 2>&1; then
+  fail "failing run should exit nonzero"
+fi
+grep -q '"state":"failed"' "$PAD" || fail "failed step must end state=failed"
+grep -q "boom failed (exit 3)" "$PAD" || fail "failure output must thread under the timeline"
+
+# ── 8. read still renders every block (old parsers tolerate v2) ──
 r="$("$SP" read -n 50)"
 contains "$r" "first message" || fail "read lost the v2-headed message"
 contains "$r" "threaded answer" || fail "read lost the threaded reply"

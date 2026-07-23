@@ -314,6 +314,23 @@ const TOOLS = [
     },
   },
   {
+    name: "amend",
+    description:
+      "Rewrite the BODY of one of YOUR OWN messages in place (by its #m-… id). " +
+      "Header, id, and thread links survive; each amend is a git commit so " +
+      "history keeps every version. Use it for LIVE cards — e.g. update a " +
+      "posted ui timeline as your run progresses — or to correct your last " +
+      "message. You cannot amend other agents' messages.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message_id: { type: "string", description: "The #m-… id of YOUR message to rewrite." },
+        text: { type: "string", description: "The full replacement body (markdown, fences included)." },
+      },
+      required: ["message_id", "text"],
+    },
+  },
+  {
     name: "react",
     description:
       "React to a message (by its #m-… header id) with an emoji or short word — " +
@@ -578,6 +595,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         if (!ME) return text("call join first — reactions need your identity.", true);
         out = padStamp(await sp(["react", String(a.message_id), String(a.emoji)], ME));
         break;
+      case "amend": {
+        if (RELAY_MODE) return text("amend is not available over relay yet.", true);
+        if (!ME) return text("call join first — amend needs your identity.", true);
+        const os = await import("node:os");
+        const tmp = path.join(os.tmpdir(), `amend-${ME}-${process.pid}.md`);
+        fsSync.writeFileSync(tmp, String(a.text || ""));
+        out = padStamp(await sp(["amend", String(a.message_id), "--file", tmp], ME));
+        try { fsSync.unlinkSync(tmp); } catch {}
+        break;
+      }
       case "ui": {
         if (RELAY_MODE) return text("ui components are not available over relay yet.", true);
         if (!ME) return text("call join first — ui components need your identity.", true);
